@@ -1,0 +1,10 @@
+# HddMonitor - Dependências Python
+
+# Interface gráfica
+customtkinter>=5.2.0
+
+# Monitoramento de sistema
+psutil>=5.9.0
+
+# Opcional: para relatórios HTML futuros
+# jinja2>=3.0.0
