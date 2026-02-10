@@ -60,9 +60,14 @@ cd hddmonitor
 # Instale dependências Python
 pip3.11 install --user customtkinter psutil
 
-# Execute (recomendado como root para acesso SMART completo)
-sudo python3.11 app.py
+# Execute (com acesso SMART completo)
+sudo -E python3.11 app.py
+
+# Ou sem sudo (funcionalidade limitada)
+python3.11 app.py
 ```
+
+> ⚠️ **Importante:** Use `sudo -E` (não apenas `sudo`) para preservar o ambiente gráfico ($DISPLAY).
 
 ## 📁 Estrutura do Projeto
 
@@ -90,9 +95,19 @@ hddmonitor/
 
 ## 🎯 Uso
 
-### Execução Básica
+### Execução
 ```bash
-sudo python3.11 app.py
+# Com acesso SMART completo (recomendado)
+sudo -E python3.11 app.py
+
+# Sem sudo (funcionalidade limitada)
+python3.11 app.py
+```
+
+### Corrigir permissões (se necessário)
+Se você rodou com `sudo` antes e agora tem problemas de permissão:
+```bash
+sudo chown -R $USER:$USER ~/Documents/hddmonitor-reports/
 ```
 
 ### Testes Disponíveis
@@ -118,6 +133,17 @@ sudo python3.11 app.py
 - Desmonte o disco antes de testes que exigem acesso exclusivo
 
 ## 🐛 Troubleshooting
+
+### "no display name and no $DISPLAY environment variable"
+- **Causa:** `sudo` não herda variáveis de ambiente
+- **Solução:** Use `sudo -E python3.11 app.py` (com `-E`)
+
+### Permissão negada ao gerar relatório
+- **Causa:** Pasta criada pelo root em execução anterior
+- **Solução:** 
+  ```bash
+  sudo chown -R $USER:$USER ~/Documents/hddmonitor-reports/
+  ```
 
 ### Temperatura mostra N/A
 - Verifique se o smartmontools está instalado

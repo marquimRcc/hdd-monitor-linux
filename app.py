@@ -3,6 +3,7 @@
 
 import sys
 import logging
+import os
 from pathlib import Path
 
 import customtkinter as ctk
@@ -10,14 +11,13 @@ import customtkinter as ctk
 from ui.dashboard import Dashboard
 from ui.diagnostic_wizard import DiagnosticWizard
 
-# Importa tudo que precisamos do config
 from core.config import (
     LOG_FILE,
     SMARTCTL_PATH,
     HDPARM_PATH,
     BADBLOCKS_PATH,
     F3PROBE_PATH,
-    COLOR_BG_MAIN,          # ← esta linha estava faltando
+    COLOR_BG_MAIN,
     COLOR_CARD_BG,
     COLOR_TEXT_LIGHT,
     COLOR_GOOD,
@@ -43,7 +43,7 @@ class HddMonitorApp(ctk.CTk):
         self.title("HddMonitor")
         self.geometry("1000x700")
         self.minsize(800, 600)
-        self.configure(fg_color=COLOR_BG_MAIN)          # ← agora funciona
+        self.configure(fg_color=COLOR_BG_MAIN)
 
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
@@ -99,10 +99,26 @@ def main():
         print("   pip3.11 install --user customtkinter")
         sys.exit(1)
 
-    import os
-    if os.geteuid() != 0:
-        print("⚠️  Recomendado rodar como root")
-        print("   sudo python3.11 app.py\n")
+    # Verifica se está rodando como root
+    is_root = os.geteuid() == 0
+    
+    # Verifica se tem display (X11)
+    has_display = os.environ.get('DISPLAY')
+    
+    if is_root and not has_display:
+        print("\n❌ Erro: sudo não herda o ambiente gráfico ($DISPLAY)")
+        print("\n   Use uma destas opções:\n")
+        print("   1. Preservar ambiente (recomendado):")
+        print("      sudo -E python3.11 app.py")
+        print("")
+        print("   2. Ou rode sem sudo (funciona para a maioria dos recursos):")
+        print("      python3.11 app.py")
+        print("")
+        sys.exit(1)
+    
+    if not is_root:
+        print("\n💡 Dica: Para acesso SMART completo, use:")
+        print("   sudo -E python3.11 app.py\n")
 
     try:
         app = HddMonitorApp()

@@ -18,12 +18,28 @@ class HTMLReportGenerator:
             disk_info: Optional[object] = None,
             open_browser: bool = True
     ) -> Path:
-        # Pasta home real (funciona com sudo)
+        # Determina pasta home do usuário real (funciona com sudo)
         sudo_user = os.environ.get('SUDO_USER')
-        home = Path("/home") / sudo_user if sudo_user else Path.home()
+        if sudo_user:
+            home = Path("/home") / sudo_user
+        else:
+            home = Path.home()
 
         reports_dir = home / "Documents" / "hddmonitor-reports"
-        reports_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Tenta criar a pasta com permissões corretas
+        try:
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Se rodando como root, ajusta permissões para o usuário real
+            if sudo_user and os.geteuid() == 0:
+                import pwd
+                user_info = pwd.getpwnam(sudo_user)
+                os.chown(reports_dir, user_info.pw_uid, user_info.pw_gid)
+        except PermissionError:
+            # Fallback: usa /tmp se não conseguir criar em Documents
+            reports_dir = Path("/tmp") / "hddmonitor-reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         filename = f"relatorio_{device.replace('/', '_')}_{int(time.time())}.html"
@@ -117,7 +133,22 @@ class HTMLReportGenerator:
 </html>
 """
 
-        path.write_text(html, encoding="utf-8")
+        # Tenta escrever o arquivo
+        try:
+            path.write_text(html, encoding="utf-8")
+            
+            # Se rodando como root, ajusta permissões do arquivo
+            if sudo_user and os.geteuid() == 0:
+                import pwd
+                user_info = pwd.getpwnam(sudo_user)
+                os.chown(path, user_info.pw_uid, user_info.pw_gid)
+                
+        except PermissionError:
+            # Fallback: salva em /tmp
+            fallback_dir = Path("/tmp") / "hddmonitor-reports"
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            path = fallback_dir / filename
+            path.write_text(html, encoding="utf-8")
 
         # Abre no navegador silenciosamente (sem popup)
         if open_browser:
