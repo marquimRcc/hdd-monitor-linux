@@ -594,8 +594,70 @@ class DiagnosticWizard(ctk.CTkToplevel):
                                             font=ctk.CTkFont(size=14, weight="bold"),
                                             command=self._open_report)
             self.report_btn.pack(pady=10, fill="x")
+            
+            # Verifica se é um disco falso para mostrar opções extras
+            self._check_for_fake_disk()
 
         self.after(0, update)
+
+    def _check_for_fake_disk(self):
+        """Verifica se algum teste detectou disco falso e mostra opções"""
+        if not self.session: return
+        
+        is_fake = False
+        real_size = 0
+        
+        for result in self.session.results.values():
+            if "fake" in result.test_id and result.status == TestStatus.FAILED:
+                is_fake = True
+                # Tenta extrair tamanho real da mensagem ou detalhes
+                import re
+                m = re.search(r'(\d+\.?\d*)\s*GB', result.details)
+                if m: real_size = float(m.group(1))
+                break
+        
+        if is_fake:
+            self._show_fake_actions(real_size)
+
+    def _show_fake_actions(self, real_size_gb: float):
+        """Mostra o painel de ações para disco falso"""
+        # Remove container de relatório padrão se existir para dar lugar ao novo painel
+        for widget in self.report_container.winfo_children():
+            if widget != self.report_btn: # Mantém o botão de relatório original
+                widget.destroy()
+            
+        action_panel = FakeActionPanel(
+            self.report_container,
+            device=self.device,
+            real_size_gb=real_size_gb,
+            on_action=self._handle_fake_action
+        )
+        action_panel.pack(fill="x", pady=10)
+        
+        # Scroll para o final para garantir visibilidade
+        self.after(100, lambda: self.main_scroll._parent_canvas.yview_moveto(1.0))
+
+    def _handle_fake_action(self, action: str):
+        """Manipula as ações do painel de disco falso"""
+        logger.info(f"Ação de disco falso selecionada: {action} para {self.device}")
+        
+        if action == "fix":
+            self._run_fix_capacity()
+        elif action == "report":
+            self._open_report()
+        else:
+            ConfirmDialog(self, title="Em breve", 
+                         message=f"A funcionalidade '{action}' será implementada em breve.",
+                         confirm_text="OK")
+
+    def _run_fix_capacity(self):
+        """Executa f3fix para corrigir a capacidade"""
+        # Simulação por enquanto
+        ConfirmDialog(self, title="Corrigir Capacidade", 
+                     message=f"Deseja executar o f3fix em {self.device}?",
+                     warning="Isso irá reparticionar o disco e apagar todos os dados.",
+                     confirm_text="Sim, Corrigir",
+                     is_destructive=True)
 
     def _open_report(self):
         if self.session and self.session.results:

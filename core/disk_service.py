@@ -51,49 +51,76 @@ class DiskService:
     @classmethod
     def get_all_disks(cls) -> List[DiskInfo]:
         disks = []
-        partitions = psutil.disk_partitions(all=True)
+        
+        # 1. Primeiro, pegamos todos os dispositivos de bloco reais via lsblk
+        block_devices = cls.get_block_devices()
+        
+        # Mapeamento de partições montadas para uso rápido
+        mounted_parts = {p.device: p for p in psutil.disk_partitions(all=True)}
 
-        for part in partitions:
-            if any(x in part.device for x in IGNORE_DEVICES):
-                continue
-            if any(x in part.mountpoint for x in IGNORE_MOUNTS):
-                continue
-            if part.fstype in IGNORE_FSTYPES:
+        for dev in block_devices:
+            name = dev.get("name", "")
+            if not name: continue
+            
+            full_path = f"/dev/{name}"
+            if any(x in full_path for x in IGNORE_DEVICES):
                 continue
 
-            try:
-                usage = psutil.disk_usage(part.mountpoint)
-                base_device = cls._get_base_device(part.device)
+            # Se for um disco (não partição), processamos
+            if dev.get("type") == "disk":
+                base_device = full_path
                 smart = cls._get_smart_info(base_device)
+                
+                # Tentamos achar o uso de disco (se houver partição montada)
+                total_gb = 0
+                used_pct = 0
+                mount_point = ""
+                
+                # Verifica se o próprio disco ou alguma partição dele está montada
+                # Para simplificar o dashboard, se for um disco sem partições montadas, 
+                # mostramos ele como um dispositivo de 0% de uso
+                try:
+                    size_bytes = int(dev.get("size", 0))
+                    total_gb = size_bytes / (1024**3)
+                except: pass
+
+                # Se houver filhos (partições), tenta pegar a montagem de uma delas
+                children = dev.get("children", [])
+                for child in children:
+                    child_path = f"/dev/{child.get('name')}"
+                    if child_path in mounted_parts:
+                        try:
+                            usage = psutil.disk_usage(mounted_parts[child_path].mountpoint)
+                            used_pct = usage.percent
+                            mount_point = mounted_parts[child_path].mountpoint
+                            break
+                        except: pass
 
                 disk = DiskInfo(
-                    device=part.device,
+                    device=full_path,
                     base_device=base_device,
-                    mount_point=part.mountpoint,
-                    total_gb=usage.total / (1024**3),
-                    used_pct=usage.percent,
+                    mount_point=mount_point,
+                    total_gb=total_gb,
+                    used_pct=used_pct,
                     temp=smart.get("temp"),
                     disk_type=smart.get("type", "Unknown"),
                     health=smart.get("health", "Unknown"),
-                    model=smart.get("model", ""),
-                    serial=smart.get("serial", ""),
+                    model=smart.get("model", dev.get("model", "")),
+                    serial=smart.get("serial", dev.get("serial", "")),
                     smart_supported=smart.get("smart_supported", False),
                     smart_enabled=smart.get("smart_enabled", False),
                     smart_driver=smart.get("driver", "")
                 )
                 disks.append(disk)
 
-            except (OSError, PermissionError) as e:
-                logger.warning(f"Ignorando {part.device}: {e}")
-                continue
-
         return disks
 
     @classmethod
     def get_block_devices(cls) -> List[dict]:
         try:
+            # -b para bytes, -J para JSON
             result = subprocess.run(
-                ["lsblk", "-J", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,SERIAL,ROTA,TRAN"],
+                ["lsblk", "-b", "-J", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MODEL,SERIAL,ROTA,TRAN"],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
