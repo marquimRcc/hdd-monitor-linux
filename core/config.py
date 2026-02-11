@@ -19,12 +19,23 @@ SMARTCTL_PATH   = find_executable("smartctl",   "/usr/sbin/smartctl")
 HDPARM_PATH     = find_executable("hdparm",     "/usr/sbin/hdparm")
 BADBLOCKS_PATH  = find_executable("badblocks",  "/sbin/badblocks")
 F3PROBE_PATH    = find_executable("f3probe",    "/usr/bin/f3probe")
+F3FIX_PATH      = find_executable("f3fix",      "/usr/bin/f3fix")
+WIPEFS_PATH     = find_executable("wipefs",     "/usr/sbin/wipefs")
+LSBLK_PATH      = find_executable("lsblk",      "/usr/bin/lsblk")
+FDISK_PATH      = find_executable("fdisk",      "/usr/sbin/fdisk")
+LSUSB_PATH      = find_executable("lsusb",      "/usr/bin/lsusb")
+UDEVADM_PATH    = find_executable("udevadm",    "/usr/bin/udevadm")
 
 
 # Diretório de logs (por usuário)
 LOG_DIR = Path.home() / ".cache" / "hddmonitor"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "hddmonitor.log"
+
+
+# Diretório de relatórios (por usuário)
+REPORT_DIR = Path.home() / "Documents" / "hddmonitor-reports"
+REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Configurações gerais

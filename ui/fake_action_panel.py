@@ -2,116 +2,123 @@
 # -*- coding: utf-8 -*-
 
 import customtkinter as ctk
-import logging
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict, Any
 
-from ui import (
-    COLOR_BG_MAIN, COLOR_CARD_BG, COLOR_TEXT_LIGHT, COLOR_TEXT_GRAY,
-    COLOR_GOOD, COLOR_WARN, COLOR_CRIT, COLOR_INFO
+from core.config import (
+    COLOR_CARD_BG, COLOR_TEXT_LIGHT, COLOR_TEXT_GRAY, COLOR_WARN, COLOR_INFO, COLOR_CRIT
 )
 
-logger = logging.getLogger(__name__)
 
 class FakeActionPanel(ctk.CTkFrame):
-    """Painel de ações para discos falsos"""
-    
+    """Painel exibido quando um teste confirma *disco fake* (f3probe).
+
+    A UI só dispara callbacks. A lógica e execução ficam no Wizard/Services.
+    """
+
     def __init__(
-        self, 
-        master, 
+        self,
+        parent,
         device: str,
-        real_size_gb: float,
-        on_action: Callable[[str], None]
+        fake_data: Optional[Dict[str, Any]],
+        action_callback: Callable[[str], None],
+        *args,
+        **kwargs
     ):
-        super().__init__(master, fg_color="transparent")
-        
+        super().__init__(parent, fg_color=COLOR_CARD_BG, corner_radius=10, *args, **kwargs)
+
         self.device = device
-        self.real_size_gb = real_size_gb
-        self.on_action = on_action
-        
-        self._setup_ui()
-        
-    def _setup_ui(self):
-        # Título da seção
-        ctk.CTkLabel(
-            self, 
-            text="🛠️ Ações Corretivas Recomendadas",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=COLOR_TEXT_LIGHT
-        ).pack(anchor="w", pady=(10, 15))
-        
-        # Grid de ações
-        grid = ctk.CTkFrame(self, fg_color="transparent")
-        grid.pack(fill="x")
-        grid.grid_columnconfigure((0, 1), weight=1)
-        
-        # Ação 1: Corrigir Tamanho
-        self._create_action_card(
-            grid, 0, 0,
-            "🔧 Corrigir para Tamanho Real",
-            f"Reparticiona o disco para {self.real_size_gb:.1f} GB (Honesto).\nSeguro para o hardware.",
-            COLOR_GOOD,
-            lambda: self.on_action("fix")
-        )
-        
-        # Ação 2: Recuperar Dados
-        self._create_action_card(
-            grid, 0, 1,
-            "📂 Tentar Recuperar Dados",
-            "Tenta salvar arquivos que ainda estão em setores válidos.\nUse antes de formatar.",
-            COLOR_INFO,
-            lambda: self.on_action("recover")
-        )
-        
-        # Ação 3: Relatório Técnico
-        self._create_action_card(
-            grid, 1, 0,
-            "📄 Gerar Relatório de Prova",
-            "Exporta PDF com evidências para solicitar reembolso ou disputa.",
-            "#4a4a5a",
-            lambda: self.on_action("report")
-        )
-        
-        # Ação 4: Destruir Firmware
-        self._create_action_card(
-            grid, 1, 1,
-            "☢️ Inutilizar Disco (Nuclear)",
-            "Sobrescreve setores críticos para impedir revenda fraudulenta.\nIrreversível.",
-            COLOR_CRIT,
-            lambda: self.on_action("destroy")
-        )
+        self.fake_data = fake_data or {}
+        self.action_callback = action_callback
 
-    def _create_action_card(self, master, row, col, title, desc, color, command):
-        card = ctk.CTkFrame(master, fg_color=COLOR_CARD_BG, corner_radius=10, border_width=1, border_color="#333333")
-        card.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
-        
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(padx=15, pady=15, fill="both", expand=True)
-        
+        header = ctk.CTkLabel(
+            self,
+            text="⚠️ Disco falsificado detectado",
+            font=("Arial", 16, "bold"),
+            text_color=COLOR_CRIT,
+        )
+        header.pack(anchor="w", padx=16, pady=(14, 6))
+
+        desc = (
+            "O teste f3probe encontrou uma diferença entre o tamanho anunciado e o tamanho realmente gravável.\n"
+            "Abaixo estão ações seguras para você decidir o que fazer."
+        )
         ctk.CTkLabel(
-            inner, text=title, 
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=color,
-            anchor="w"
-        ).pack(fill="x")
-        
-        ctk.CTkLabel(
-            inner, text=desc,
-            font=ctk.CTkFont(size=11),
-            text_color=COLOR_TEXT_GRAY,
+            self,
+            text=desc,
+            font=("Arial", 12),
+            text_color=COLOR_TEXT_LIGHT,
             justify="left",
-            wraplength=300,
-            anchor="w"
-        ).pack(fill="x", pady=(5, 10))
-        
-        ctk.CTkButton(
-            inner, text="Executar",
-            fg_color=color,
-            hover_color=self._darken(color),
-            height=30,
-            command=command
-        ).pack(side="bottom", fill="x")
+        ).pack(anchor="w", padx=16, pady=(0, 10))
 
-    def _darken(self, hex_color):
-        if not hex_color.startswith("#"): return hex_color
-        # Simples escurecimento para o hover
-        return hex_color # Simplificado por agora
+        # Resumo (capacidades)
+        summary_lines = []
+        ann = self.fake_data.get("announced_size_human")
+        usab = self.fake_data.get("usable_size_human")
+        if ann:
+            summary_lines.append(f"• Capacidade anunciada: {ann}")
+        if usab:
+            summary_lines.append(f"• Capacidade real (gravável): {usab}")
+        if self.fake_data.get("physical_block_size_bytes"):
+            summary_lines.append(f"• Bloco físico: {self.fake_data['physical_block_size_bytes']} bytes")
+
+        fix_cmd = self.fake_data.get("suggested_fix_command")
+        if fix_cmd:
+            summary_lines.append("\nRecomendação:\n" + fix_cmd)
+
+        if summary_lines:
+            ctk.CTkLabel(
+                self,
+                text="\n".join(summary_lines),
+                font=("Consolas", 11),
+                text_color=COLOR_TEXT_GRAY,
+                justify="left",
+            ).pack(anchor="w", padx=16, pady=(0, 12))
+
+        # Botões (fluxo UX)
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=16, pady=(0, 14))
+
+        # 1) Relatório (evidências)
+        ctk.CTkButton(
+            btn_frame,
+            text="📄 Gerar relatório técnico (recomendado)",
+            fg_color=COLOR_INFO,
+            command=lambda: self.action_callback("report"),
+            height=38,
+        ).pack(fill="x", pady=(0, 8))
+
+        # 2) Corrigir para o tamanho real
+        ctk.CTkButton(
+            btn_frame,
+            text="🔧 Corrigir para tamanho real (f3fix) — APAGA o disco",
+            fg_color=COLOR_WARN,
+            command=lambda: self.action_callback("fix_real"),
+            height=38,
+        ).pack(fill="x", pady=(0, 8))
+
+        # 3) Recuperar dados (não destrutivo)
+        ctk.CTkButton(
+            btn_frame,
+            text="🧯 Tentar recuperar dados (somente leitura)",
+            fg_color="#57606f",
+            command=lambda: self.action_callback("recover"),
+            height=38,
+        ).pack(fill="x", pady=(0, 8))
+
+        # 4) Preparar para devolução/descarte (limpar assinaturas)
+        ctk.CTkButton(
+            btn_frame,
+            text="♻️ Preparar para devolução/descarte (wipe rápido) — APAGA metadados",
+            fg_color="#8e44ad",
+            command=lambda: self.action_callback("prepare_return"),
+            height=38,
+        ).pack(fill="x", pady=(0, 8))
+
+        # 5) Exportar evidência JSON (para Procon/chargeback/DB)
+        ctk.CTkButton(
+            btn_frame,
+            text="📦 Exportar evidências em JSON (para compartilhar)",
+            fg_color="#1e90ff",
+            command=lambda: self.action_callback("export_json"),
+            height=38,
+        ).pack(fill="x")

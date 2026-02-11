@@ -16,7 +16,15 @@ from ui.components import TestProgressCard, ConfirmDialog
 from core.disk_service import DiskService
 from core.smart_parser import SmartParser
 from core.health_score import calculate_health
-from core.fake_detector import FakeDetector, FakeStatus
+from core.fake_detector import FakeDetector
+from core.fake_remediation import (
+    build_f3fix_command,
+    wipe_signatures_commands,
+    export_fake_evidence_json,
+    run_cmd,
+)
+from core.config import REPORT_DIR
+
 from core.test_runner import (
     TestRunner, TestSession, TestPhase, TestStatus,
     AVAILABLE_TESTS, TestDefinition
@@ -599,66 +607,245 @@ class DiagnosticWizard(ctk.CTkToplevel):
             self._check_for_fake_disk()
 
         self.after(0, update)
-
     def _check_for_fake_disk(self):
-        """Verifica se algum teste detectou disco falso e mostra opções"""
-        if not self.session: return
-        
-        is_fake = False
-        real_size = 0
-        
-        for result in self.session.results.values():
-            if "fake" in result.test_id and result.status == TestStatus.FAILED:
-                is_fake = True
-                # Tenta extrair tamanho real da mensagem ou detalhes
-                import re
-                m = re.search(r'(\d+\.?\d*)\s*GB', result.details)
-                if m: real_size = float(m.group(1))
-                break
-        
-        if is_fake:
-            self._show_fake_actions(real_size)
+        """Mostra painel de ações se o f3probe confirmou falsificação."""
+        for result in self.session_results:
+            if result.test_id == "f3probe" and result.status == TestStatus.FAILED:
+                fake_data = result.data if isinstance(result.data, dict) else None
 
-    def _show_fake_actions(self, real_size_gb: float):
-        """Mostra o painel de ações para disco falso"""
-        # Remove container de relatório padrão se existir para dar lugar ao novo painel
-        for widget in self.report_container.winfo_children():
-            if widget != self.report_btn: # Mantém o botão de relatório original
-                widget.destroy()
-            
-        action_panel = FakeActionPanel(
-            self.report_container,
-            device=self.device,
-            real_size_gb=real_size_gb,
-            on_action=self._handle_fake_action
-        )
-        action_panel.pack(fill="x", pady=10)
-        
-        # Scroll para o final para garantir visibilidade
-        self.after(100, lambda: self.main_scroll._parent_canvas.yview_moveto(1.0))
+                # Limpa área de relatório e mostra painel
+                for widget in self.report_container.winfo_children():
+                    widget.destroy()
 
+                panel = FakeActionPanel(
+                    self.report_container,
+                    device=self.device,
+                    fake_data=fake_data,
+                    action_callback=self._handle_fake_action
+                )
+                panel.pack(fill="x", pady=10)
+                return
     def _handle_fake_action(self, action: str):
-        """Manipula as ações do painel de disco falso"""
-        logger.info(f"Ação de disco falso selecionada: {action} para {self.device}")
-        
-        if action == "fix":
-            self._run_fix_capacity()
-        elif action == "report":
+        """Executa a ação escolhida no painel de disco fake."""
+        if action == "report":
             self._open_report()
+        elif action == "fix_real":
+            self._run_fix_capacity()
+        elif action == "recover":
+            self._run_recover_data()
+        elif action == "prepare_return":
+            self._run_prepare_return()
+        elif action == "export_json":
+            self._export_fake_json()
         else:
-            ConfirmDialog(self, title="Em breve", 
-                         message=f"A funcionalidade '{action}' será implementada em breve.",
-                         confirm_text="OK")
-
+            messagebox.showinfo("Ação", f"Ação não reconhecida: {action}")
     def _run_fix_capacity(self):
-        """Executa f3fix para corrigir a capacidade"""
-        # Simulação por enquanto
-        ConfirmDialog(self, title="Corrigir Capacidade", 
-                     message=f"Deseja executar o f3fix em {self.device}?",
-                     warning="Isso irá reparticionar o disco e apagar todos os dados.",
-                     confirm_text="Sim, Corrigir",
-                     is_destructive=True)
+        """Roda o f3fix usando o last-sec identificado pelo f3probe.
 
+        AVISO: é destrutivo (recria tabela/partição), então pede confirmação forte.
+        """
+        f3data = None
+        for r in self.session_results:
+            if r.test_id == "f3probe" and isinstance(r.data, dict):
+                f3data = r.data
+                break
+
+        last_sec = None
+        if f3data:
+            last_sec = f3data.get("last_sec")
+
+        if last_sec is None:
+            messagebox.showwarning(
+                "f3fix",
+                "Não consegui identificar o last-sec do f3probe.\n"
+                "Reexecute o teste f3probe ou use o comando sugerido no painel."
+            )
+            return
+
+        cmd = build_f3fix_command(self.device, int(last_sec))
+        cmd_str = " ".join(cmd)
+
+        confirm_msg = (
+            "Esta ação VAI APAGAR a tabela de partição / metadados do disco e criar uma partição com o tamanho real.\n\n"
+            "Use apenas se você já salvou tudo o que precisava.\n\n"
+            f"Comando:\n{cmd_str}"
+        )
+
+        def do_run():
+            try:
+                self._set_report_status("Executando f3fix... (isso pode levar alguns segundos)")
+                p = run_cmd(cmd, timeout=1200)
+                out = (p.stdout or "") + (p.stderr or "")
+                if p.returncode == 0:
+                    self._set_report_status("✅ f3fix concluído. Remova e reconecte o disco para o sistema recarregar as partições.")
+                else:
+                    self._set_report_status("❌ f3fix falhou. Veja a saída abaixo (talvez precise rodar o app como root).")
+                self._append_report_log(out.strip() or "(sem saída)")
+            except Exception as e:
+                self._set_report_status(f"❌ Erro ao executar f3fix: {e}")
+
+        ConfirmDialog(
+            parent=self,
+            title="Confirmar correção para tamanho real",
+            message=confirm_msg,
+            confirm_text="APAGAR E CORRIGIR",
+            cancel_text="Cancelar",
+            on_confirm=do_run
+        )
+
+    def _run_recover_data(self):
+        """Ajuda o usuário a tentar salvar o que for possível (não destrutivo)."""
+        mount_point = None
+        try:
+            mount_point = getattr(self.disk_info, "mount_point", None)
+        except Exception:
+            pass
+
+        msg = (
+            "Recuperação (somente leitura):\n\n"
+            "1) Se o disco estiver montado, copie imediatamente os arquivos importantes para outro disco.\n"
+            "2) Evite escrever nesse disco (qualquer gravação pode cair fora da área real e corromper tudo).\n\n"
+        )
+
+        if mount_point:
+            msg += f"Ponto de montagem detectado: {mount_point}\n\n"
+            msg += "Quer abrir a pasta agora?"
+        else:
+            msg += (
+                "Não encontrei um ponto de montagem automático.\n"
+                "Você pode tentar montar a partição manualmente e copiar os arquivos que existirem.\n"
+                "Exemplo (ajuste /dev/sdX1):\n"
+                f"  sudo mkdir -p /mnt/recovery && sudo mount -o ro {self.device}1 /mnt/recovery\n"
+            )
+
+        def open_folder():
+            try:
+                import subprocess
+                if mount_point:
+                    subprocess.run(["xdg-open", str(mount_point)], check=False)
+            except Exception:
+                pass
+
+        ConfirmDialog(
+            parent=self,
+            title="Recuperar dados",
+            message=msg,
+            confirm_text="Abrir pasta" if mount_point else "OK",
+            cancel_text="Fechar",
+            on_confirm=open_folder if mount_point else (lambda: None),
+        )
+
+    def _run_prepare_return(self):
+        """Limpa assinaturas/metadados para devolução/descarte (destrutivo, mas rápido)."""
+        cmds = wipe_signatures_commands(self.device)
+        cmd_preview = "\n".join([" ".join(c) for c in cmds])
+
+        confirm_msg = (
+            "Isto vai APAGAR assinaturas de filesystem/RAID e a tabela de partição (MBR/GPT).\n"
+            "É útil para devolução/descarte e para evitar que o disco seja 'reformatado' e revendido como novo.\n\n"
+            "NÃO apaga o disco inteiro (não é wipe completo), mas é destrutivo para o conteúdo visível.\n\n"
+            f"Comandos:\n{cmd_preview}"
+        )
+
+        def do_wipe():
+            try:
+                self._set_report_status("Executando limpeza rápida (wipefs + dd)...")
+                full_out = []
+                ok = True
+                for c in cmds:
+                    p = run_cmd(c, timeout=1200)
+                    out = (p.stdout or "") + (p.stderr or "")
+                    full_out.append(f"$ {' '.join(c)}\n{out}\n")
+                    if p.returncode != 0:
+                        ok = False
+                if ok:
+                    self._set_report_status("✅ Limpeza concluída. Agora o disco deve aparecer como 'não inicializado'.")
+                else:
+                    self._set_report_status("⚠️ Limpeza terminou com erros. Veja a saída abaixo.")
+                self._append_report_log("\n".join(full_out).strip())
+            except Exception as e:
+                self._set_report_status(f"❌ Erro na limpeza: {e}")
+
+        ConfirmDialog(
+            parent=self,
+            title="Confirmar limpeza para devolução/descarte",
+            message=confirm_msg,
+            confirm_text="APAGAR METADADOS",
+            cancel_text="Cancelar",
+            on_confirm=do_wipe
+        )
+
+    def _export_fake_json(self):
+        """Exporta um JSON de evidências (para disputa / compartilhamento)."""
+        f3data = {}
+        for r in self.session_results:
+            if r.test_id == "f3probe" and isinstance(r.data, dict):
+                f3data = r.data
+                break
+
+        disk_info_dict = {}
+        for attr in ["device", "model", "serial", "size", "transport", "mount_point", "fstype", "health_score", "temperature"]:
+            try:
+                v = getattr(self.disk_info, attr, None)
+                if v is not None:
+                    disk_info_dict[attr] = v
+            except Exception:
+                pass
+
+        tests = []
+        for r in self.session_results:
+            tests.append({
+                "test_id": r.test_id,
+                "name": r.name,
+                "status": str(r.status),
+                "message": r.message,
+                "duration_seconds": r.duration_seconds,
+                "data": r.data,
+            })
+
+        try:
+            out_path = export_fake_evidence_json(
+                device=self.device,
+                disk_info=disk_info_dict,
+                f3probe_data=f3data,
+                session_results=tests,
+                out_dir=REPORT_DIR
+            )
+            self._set_report_status(f"📦 Evidências exportadas: {out_path}")
+            try:
+                import subprocess
+                subprocess.run(["xdg-open", str(out_path.parent)], check=False)
+            except Exception:
+                pass
+        except Exception as e:
+            messagebox.showerror("Exportar JSON", f"Falha ao exportar evidências: {e}")
+
+    def _set_report_status(self, text: str):
+        """Atualiza/Cria um label de status dentro do report_container."""
+        try:
+            if hasattr(self, "report_status_label") and self.report_status_label:
+                self.report_status_label.configure(text=text)
+            else:
+                self.report_status_label = ctk.CTkLabel(
+                    self.report_container,
+                    text=text,
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color=COLOR_TEXT_LIGHT,
+                    anchor="w"
+                )
+                self.report_status_label.pack(fill="x", pady=(8, 4))
+        except Exception:
+            pass
+
+    def _append_report_log(self, text: str):
+        """Anexa um log (CTkTextbox) na UI."""
+        try:
+            box = ctk.CTkTextbox(self.report_container, height=200)
+            box.pack(fill="x", pady=(6, 10))
+            box.insert("1.0", text or "")
+            box.configure(state="disabled")
+        except Exception:
+            pass
     def _open_report(self):
         if self.session and self.session.results:
             path = generate_html_report(

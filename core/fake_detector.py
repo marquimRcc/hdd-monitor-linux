@@ -1,326 +1,276 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Detecção rápida de problemas comuns (e falsificações prováveis).
 
-import subprocess
-import re
+Importante:
+- "Disco fake" (capacidade anunciada maior que a real) só é confirmado com f3probe/f3read.
+- Aqui a gente aponta *sinais* e causas comuns de "perdi 1TB":
+  - HPA (Host Protected Area) limitando setores (hdparm -N)
+  - Tabela de partição MBR (dos) limitando partições a ~2TB
+"""
+
+from __future__ import annotations
+
+import json
 import logging
+import re
+import subprocess
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
 from enum import Enum
-from pathlib import Path
+from typing import Optional, List, Dict, Any
 
-from core.config import HDPARM_PATH, F3PROBE_PATH
+from core.config import (
+    LSBLK_PATH, FDISK_PATH, HDPARM_PATH, SMARTCTL_PATH,
+)
 
 logger = logging.getLogger(__name__)
 
-class FakeStatus(Enum):
-    GENUINE = "genuine"
-    SUSPICIOUS = "suspicious"
-    FAKE = "fake"
-    UNKNOWN = "unknown"
-    UNTESTED = "untested"
 
-class TestResult(Enum):
-    PASSED = "passed"
-    FAILED = "failed"
-    WARNING = "warning"
-    SKIPPED = "skipped"
-    ERROR = "error"
+class FakeTestStatus(str, Enum):
+    PASS = "PASS"
+    WARNING = "WARNING"
+    FAIL = "FAIL"
+
 
 @dataclass
 class CapacityInfo:
-    lsblk_bytes: int = 0
-    fdisk_bytes: int = 0
-    smart_bytes: int = 0
-    hdparm_native_sectors: int = 0
-    hdparm_max_sectors: int = 0
+    device: str
+    lsblk_total_bytes: Optional[int] = None
+    fdisk_total_bytes: Optional[int] = None
+    disklabel_type: Optional[str] = None
+    largest_partition_bytes: Optional[int] = None
 
-    lsblk_human: str = ""
-    fdisk_human: str = ""
-    smart_human: str = ""
+    hdparm_current_sectors: Optional[int] = None
+    hdparm_native_sectors: Optional[int] = None
+    hpa_enabled: Optional[bool] = None
 
-    def has_hpa(self) -> bool:
-        if self.hdparm_native_sectors > 0 and self.hdparm_max_sectors > 0:
-            return self.hdparm_native_sectors != self.hdparm_max_sectors
-        return False
+    transport: Optional[str] = None  # sata/usb/nvme etc (quando possível)
 
-    def get_hpa_size_bytes(self) -> int:
-        if self.has_hpa():
-            return (self.hdparm_max_sectors - self.hdparm_native_sectors) * 512
-        return 0
-
-    def has_capacity_mismatch(self, tolerance_pct: float = 5.0) -> bool:
-        values = [v for v in [self.lsblk_bytes, self.fdisk_bytes, self.smart_bytes] if v > 0]
-        if len(values) < 2:
-            return False
-
-        max_val = max(values)
-        min_val = min(values)
-
-        if max_val == 0:
-            return False
-
-        diff_pct = ((max_val - min_val) / max_val) * 100
-        return diff_pct > tolerance_pct
 
 @dataclass
 class FakeTestResult:
     name: str
-    result: TestResult
-    message: str
-    details: str = ""
-    is_destructive: bool = False
+    status: FakeTestStatus
+    details: str
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    suggested_command: str = ""
+
 
 @dataclass
 class FakeDetectorReport:
     device: str
-    status: FakeStatus = FakeStatus.UNTESTED
-    confidence: int = 0
+    summary: str
+    tests: List[FakeTestResult]
+    capacities: CapacityInfo
+    is_suspicious: bool = False
 
-    capacity: CapacityInfo = field(default_factory=CapacityInfo)
-    tests: List[FakeTestResult] = field(default_factory=list)
-
-    summary: str = ""
-    recommendations: List[str] = field(default_factory=list)
-
-    def add_test(self, test: FakeTestResult):
-        self.tests.append(test)
-
-    def get_failed_tests(self) -> List[FakeTestResult]:
-        return [t for t in self.tests if t.result == TestResult.FAILED]
-
-    def get_warnings(self) -> List[FakeTestResult]:
-        return [t for t in self.tests if t.result == TestResult.WARNING]
 
 class FakeDetector:
-    @classmethod
-    def quick_check(cls, device: str) -> FakeDetectorReport:
-        report = FakeDetectorReport(device=device)
+    """Detector rápido: traz alertas úteis antes dos testes pesados."""
 
-        report.capacity = cls._collect_capacities(device)
-
-        hpa_result = cls._check_hpa(device, report.capacity)
-        report.add_test(hpa_result)
-
-        capacity_result = cls._check_capacity_consistency(report.capacity)
-        report.add_test(capacity_result)
-
-        suspect_result = cls._check_suspect_features(device)
-        report.add_test(suspect_result)
-
-        cls._calculate_final_status(report)
-        return report
+    @staticmethod
+    def _run(cmd: List[str], timeout: int = 20) -> str:
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            out = (p.stdout or "") + (p.stderr or "")
+            return out.strip()
+        except subprocess.TimeoutExpired:
+            return ""
+        except Exception as e:
+            logger.debug(f"Erro executando {cmd}: {e}")
+            return ""
 
     @classmethod
-    def full_check(cls, device: str, allow_destructive: bool = False) -> FakeDetectorReport:
-        report = cls.quick_check(device)
-
-        if allow_destructive:
-            f3_result = cls._run_f3probe(device)
-            report.add_test(f3_result)
-            cls._calculate_final_status(report)
-
-        return report
+    def _lsblk_json(cls, device: str) -> Dict[str, Any]:
+        out = cls._run([LSBLK_PATH, "-b", "-J", "-o", "NAME,SIZE,TYPE,TRAN", device], timeout=20)
+        try:
+            return json.loads(out) if out else {}
+        except Exception:
+            return {}
 
     @classmethod
     def _collect_capacities(cls, device: str) -> CapacityInfo:
-        cap = CapacityInfo()
+        cap = CapacityInfo(device=device)
 
+        # lsblk size (bytes)
+        out = cls._run([LSBLK_PATH, "-b", "-dn", "-o", "SIZE,TRAN", device], timeout=10)
+        if out:
+            parts = out.split()
+            try:
+                cap.lsblk_total_bytes = int(parts[0])
+            except Exception:
+                pass
+            if len(parts) > 1:
+                cap.transport = parts[1]
+
+        # fdisk: disk bytes + disklabel type
+        fdisk = cls._run([FDISK_PATH, "-l", device], timeout=20)
+        # Ex: "Disk /dev/sdc: 2.73 TiB, 3000592982016 bytes, 5860533168 sectors"
+        m = re.search(r"bytes,\s*(\d+)\s+sectors", fdisk)
+        if m:
+            try:
+                # não é o tamanho em bytes, é setores; bytes está antes.
+                pass
+            except Exception:
+                pass
+        m = re.search(r"Disk\s+%s:\s+[^,]+,\s*(\d+)\s+bytes" % re.escape(device), fdisk)
+        if m:
+            try:
+                cap.fdisk_total_bytes = int(m.group(1))
+            except Exception:
+                pass
+        m = re.search(r"Disklabel type:\s*(\w+)", fdisk)
+        if m:
+            cap.disklabel_type = m.group(1).strip().lower()
+
+        # maior partição (bytes)
+        ls = cls._lsblk_json(device)
         try:
-            out = subprocess.check_output(["lsblk", "-b", "-o", "SIZE", device], text=True)
-            cap.lsblk_bytes = int(out.strip().splitlines()[-1].strip())
-        except:
+            devs = ls.get("blockdevices", [])
+            if devs:
+                root = devs[0]
+                cap.transport = cap.transport or root.get("tran")
+                maxp = 0
+                for ch in root.get("children", []) or []:
+                    if ch.get("type") == "part":
+                        try:
+                            sz = int(ch.get("size", 0))
+                            maxp = max(maxp, sz)
+                        except Exception:
+                            pass
+                cap.largest_partition_bytes = maxp or None
+        except Exception:
             pass
 
-        try:
-            out = subprocess.check_output(["fdisk", "-l", device], text=True, stderr=subprocess.STDOUT)
-            m = re.search(r'Disk .*?: (\d+)', out)
-            if m:
-                cap.fdisk_bytes = int(m.group(1))
-        except:
-            pass
-
-        try:
-            out = subprocess.check_output([SMARTCTL_PATH, "-i", device], text=True)
-            m = re.search(r'User Capacity:\s+([\d,]+) bytes', out)
-            if m:
-                cap.smart_bytes = int(m.group(1).replace(',', ''))
-        except:
-            pass
-
-        try:
-            out = subprocess.check_output([HDPARM_PATH, "-N", device], text=True)
-            m_native = re.search(r'native.*max sectors:\s*(\d+)', out)
-            m_max = re.search(r'current max sectors:\s*(\d+)', out)
-            if m_native:
-                cap.hdparm_native_sectors = int(m_native.group(1))
-            if m_max:
-                cap.hdparm_max_sectors = int(m_max.group(1))
-        except:
-            pass
-
-        cap.lsblk_human = cls._bytes_to_human(cap.lsblk_bytes)
-        cap.fdisk_human = cls._bytes_to_human(cap.fdisk_bytes)
-        cap.smart_human = cls._bytes_to_human(cap.smart_bytes)
+        # hdparm -N (HPA)
+        hd = cls._run([HDPARM_PATH, "-N", device], timeout=15)
+        # Ex: "max sectors   = 5860533168/5860533168, HPA is disabled"
+        m = re.search(r"max\s+sectors\s*=\s*(\d+)\s*/\s*(\d+)", hd)
+        if m:
+            try:
+                cap.hdparm_current_sectors = int(m.group(1))
+                cap.hdparm_native_sectors = int(m.group(2))
+                cap.hpa_enabled = cap.hdparm_current_sectors != cap.hdparm_native_sectors
+            except Exception:
+                pass
 
         return cap
 
-    @classmethod
-    def _check_hpa(cls, device: str, cap: CapacityInfo) -> FakeTestResult:
-        if cap.has_hpa():
-            size_hpa = cls._bytes_to_human(cap.get_hpa_size_bytes())
-            return FakeTestResult(
-                name="HPA",
-                result=TestResult.WARNING,
-                message=f"Área protegida (HPA) detectada: {size_hpa}",
-                details=f"Native: {cap.hdparm_native_sectors} setores\n"
-                        f"Current: {cap.hdparm_max_sectors} setores"
-            )
-        return FakeTestResult(
-            name="HPA",
-            result=TestResult.PASSED,
-            message="Nenhuma HPA detectada"
-        )
-
-    @classmethod
-    def _check_capacity_consistency(cls, cap: CapacityInfo) -> FakeTestResult:
-        if cap.has_capacity_mismatch():
-            return FakeTestResult(
-                name="Capacidade",
-                result=TestResult.FAILED,
-                message="Discrepância significativa entre fontes de capacidade"
-            )
-        return FakeTestResult(
-            name="Capacidade",
-            result=TestResult.PASSED,
-            message="Capacidades consistentes entre fontes"
-        )
-
-    @classmethod
-    def _check_suspect_features(cls, device: str) -> FakeTestResult:
-        return FakeTestResult(
-            name="Características suspeitas",
-            result=TestResult.SKIPPED,
-            message="Análise de características não implementada nesta versão"
-        )
-
-    @classmethod
-    def _run_f3probe(cls, device: str) -> FakeTestResult:
-        try:
-            result = subprocess.run(
-                [F3PROBE_PATH, "--time=5m", device],
-                capture_output=True, text=True, timeout=300
-            )
-            output = result.stdout + result.stderr
-
-            if "seems to be" in output.lower() and "fake" in output.lower():
-                return FakeTestResult(
-                    name="f3probe",
-                    result=TestResult.FAILED,
-                    message="Disco falso confirmado pelo f3probe",
-                    details=output,
-                    is_destructive=True
-                )
-            elif "real" in output.lower() or "genuine" in output.lower():
-                return FakeTestResult(
-                    name="f3probe",
-                    result=TestResult.PASSED,
-                    message="Disco parece genuíno segundo f3probe",
-                    details=output,
-                    is_destructive=True
-                )
-            else:
-                return FakeTestResult(
-                    name="f3probe",
-                    result=TestResult.ERROR,
-                    message="Resultado inconclusivo do f3probe",
-                    details=output,
-                    is_destructive=True
-                )
-
-        except subprocess.TimeoutExpired:
-            return FakeTestResult(
-                name="f3probe",
-                result=TestResult.ERROR,
-                message="Timeout ao executar f3probe",
-                details="O teste demorou mais de 5 minutos",
-                is_destructive=True
-            )
-        except Exception as e:
-            return FakeTestResult(
-                name="f3probe",
-                result=TestResult.ERROR,
-                message=f"Erro ao executar f3probe: {e}",
-                details=str(e),
-                is_destructive=True
-            )
-
-    @classmethod
-    def _calculate_final_status(cls, report: FakeDetectorReport):
-        failed = report.get_failed_tests()
-        warnings = report.get_warnings()
-        passed = [t for t in report.tests if t.result == TestResult.PASSED]
-
-        fail_points = len(failed) * 30
-        warn_points = len(warnings) * 10
-        pass_points = len(passed) * 20
-
-        if any(t.name == "f3probe" and t.result == TestResult.FAILED for t in failed):
-            report.status = FakeStatus.FAKE
-            report.confidence = 100
-            report.summary = "🔴 DISCO FALSO CONFIRMADO pelo f3probe"
-        elif len(failed) >= 2:
-            report.status = FakeStatus.FAKE
-            report.confidence = min(90, 50 + fail_points)
-            report.summary = "🔴 ALTA PROBABILIDADE DE FALSIFICAÇÃO"
-        elif failed:
-            report.status = FakeStatus.SUSPICIOUS
-            report.confidence = min(70, 30 + fail_points + warn_points)
-            report.summary = "🟡 SUSPEITO - Recomendado teste completo"
-        elif warnings:
-            report.status = FakeStatus.SUSPICIOUS
-            report.confidence = min(50, 20 + warn_points)
-            report.summary = "🟡 Algumas características suspeitas"
-        elif passed:
-            report.status = FakeStatus.GENUINE
-            report.confidence = min(80, pass_points)
-            report.summary = "🟢 Parece autêntico (recomendado f3probe para 100%)"
-        else:
-            report.status = FakeStatus.UNKNOWN
-            report.confidence = 0
-            report.summary = "⚪ Não foi possível determinar"
-
-        report.recommendations = []
-
-        if report.status in [FakeStatus.SUSPICIOUS, FakeStatus.UNKNOWN]:
-            report.recommendations.append(
-                "Execute o teste f3probe para confirmação definitiva "
-                "(ATENÇÃO: apaga todos os dados!)"
-            )
-
-        if report.capacity.has_hpa():
-            report.recommendations.append(
-                "Área protegida (HPA) detectada. Pode ser desabilitada com: "
-                f"sudo hdparm --yes-i-know-what-i-am-doing -N p{report.capacity.hdparm_max_sectors} {report.device}"
-            )
-
-        if report.status == FakeStatus.FAKE:
-            report.recommendations.append(
-                "NÃO use este disco para armazenar dados importantes!"
-            )
-            report.recommendations.append(
-                "Se foi compra recente, solicite reembolso ao vendedor"
-            )
-
     @staticmethod
-    def _bytes_to_human(size_bytes: int) -> str:
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if abs(size_bytes) < 1024.0:
-                return f"{size_bytes:.2f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.2f} PB"
+    def _bytes_to_human(num: Optional[int]) -> str:
+        if not num:
+            return "N/A"
+        for unit in ["B", "KB", "MB", "GB", "TB", "PB"]:
+            if num < 1024.0:
+                return f"{num:.2f} {unit}" if unit != "B" else f"{int(num)} {unit}"
+            num /= 1024.0
+        return f"{num:.2f} EB"
 
-def check_fake(device: str, full: bool = False) -> FakeDetectorReport:
-    if full:
-        return FakeDetector.full_check(device, allow_destructive=True)
-    return FakeDetector.quick_check(device)
+    @classmethod
+    def quick_check(cls, device: str) -> FakeDetectorReport:
+        cap = cls._collect_capacities(device)
+        tests: List[FakeTestResult] = []
+
+        # 1) Consistência lsblk vs fdisk (só para diagnóstico)
+        if cap.lsblk_total_bytes and cap.fdisk_total_bytes:
+            diff = abs(cap.lsblk_total_bytes - cap.fdisk_total_bytes)
+            ratio = diff / max(cap.lsblk_total_bytes, cap.fdisk_total_bytes)
+            if ratio > 0.02:
+                tests.append(FakeTestResult(
+                    name="Tamanho (lsblk vs fdisk)",
+                    status=FakeTestStatus.WARNING,
+                    details=(
+                        f"lsblk={cls._bytes_to_human(cap.lsblk_total_bytes)} | "
+                        f"fdisk={cls._bytes_to_human(cap.fdisk_total_bytes)}\n"
+                        "Isso pode indicar bridge USB reportando geometria estranha, HPA, ou tabela de partição confusa."
+                    ),
+                    evidence={"lsblk_total_bytes": cap.lsblk_total_bytes, "fdisk_total_bytes": cap.fdisk_total_bytes},
+                ))
+            else:
+                tests.append(FakeTestResult(
+                    name="Tamanho (lsblk vs fdisk)",
+                    status=FakeTestStatus.PASS,
+                    details=f"OK: {cls._bytes_to_human(cap.lsblk_total_bytes)}",
+                    evidence={"lsblk_total_bytes": cap.lsblk_total_bytes, "fdisk_total_bytes": cap.fdisk_total_bytes},
+                ))
+
+        # 2) HPA (Host Protected Area) limitando capacidade
+        if cap.hpa_enabled is True and cap.hdparm_native_sectors and cap.hdparm_current_sectors:
+            tests.append(FakeTestResult(
+                name="HPA (capacidade limitada)",
+                status=FakeTestStatus.WARNING,
+                details=(
+                    f"O disco está com HPA habilitado: current={cap.hdparm_current_sectors} / native={cap.hdparm_native_sectors} setores.\n"
+                    "Isso pode fazer o disco aparecer menor do que deveria."
+                ),
+                evidence={
+                    "current_sectors": cap.hdparm_current_sectors,
+                    "native_sectors": cap.hdparm_native_sectors
+                },
+                suggested_command=f"sudo {HDPARM_PATH} -N p{cap.hdparm_native_sectors} {device}"
+            ))
+        elif cap.hpa_enabled is False and cap.hdparm_native_sectors:
+            tests.append(FakeTestResult(
+                name="HPA (capacidade limitada)",
+                status=FakeTestStatus.PASS,
+                details="HPA desabilitado",
+                evidence={
+                    "current_sectors": cap.hdparm_current_sectors,
+                    "native_sectors": cap.hdparm_native_sectors
+                }
+            ))
+
+        # 3) MBR (dos) limitando partições a ~2TB
+        TWO_TIB = 2 * (1024**4)
+        if cap.disklabel_type == "dos" and cap.fdisk_total_bytes and cap.fdisk_total_bytes > TWO_TIB:
+            # Se maior partição <=2TiB, é um indício forte do problema clássico.
+            if cap.largest_partition_bytes and cap.largest_partition_bytes <= TWO_TIB + (512 * 2048):
+                tests.append(FakeTestResult(
+                    name="Tabela de Partição (MBR 2TB)",
+                    status=FakeTestStatus.WARNING,
+                    details=(
+                        "O disco é maior que 2TB e está com 'Disklabel type: dos' (MBR).\n"
+                        "MBR não suporta partições >2TB, então você consegue criar no máximo ~2TB e o restante parece 'sumir'."
+                    ),
+                    evidence={
+                        "disklabel_type": cap.disklabel_type,
+                        "disk_total_bytes": cap.fdisk_total_bytes,
+                        "largest_partition_bytes": cap.largest_partition_bytes
+                    },
+                    suggested_command=(
+                        f"# ATENÇÃO: apaga tabela de partição (perde dados!)\n"
+                        f"sudo parted {device} mklabel gpt"
+                    )
+                ))
+            else:
+                tests.append(FakeTestResult(
+                    name="Tabela de Partição (MBR 2TB)",
+                    status=FakeTestStatus.WARNING,
+                    details=(
+                        "O disco está em MBR (dos) e é >2TB. Considere migrar para GPT.\n"
+                        "Obs: dá para ter múltiplas partições <=2TB, mas a abordagem recomendada hoje é GPT."
+                    ),
+                    evidence={
+                        "disklabel_type": cap.disklabel_type,
+                        "disk_total_bytes": cap.fdisk_total_bytes,
+                        "largest_partition_bytes": cap.largest_partition_bytes
+                    }
+                ))
+
+        # 4) Lembrete: f3probe é o veredito para 'fake'
+        tests.append(FakeTestResult(
+            name="Disco fake (veredito)",
+            status=FakeTestStatus.PASS,
+            details="Use o teste f3probe para confirmar falsificação e descobrir o tamanho real.",
+            evidence={}
+        ))
+
+        suspicious = any(t.status == FakeTestStatus.FAIL for t in tests)
+        summary = "OK" if not suspicious else "SUSPEITO"
+        return FakeDetectorReport(
+            device=device,
+            summary=summary,
+            tests=tests,
+            capacities=cap,
+            is_suspicious=suspicious
+        )

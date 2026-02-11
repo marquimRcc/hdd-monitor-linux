@@ -8,7 +8,7 @@ import logging
 import re
 import random
 import psutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Optional, Callable, List, Dict, Any
 from enum import Enum, auto
 from pathlib import Path
@@ -271,7 +271,7 @@ class TestRunner:
             test_id="health_check",
             status=TestStatus.COMPLETED,
             message=f"Saúde: {report.label} ({report.score}%)",
-            data=report,
+            data=asdict(report),
             duration_seconds=time.time() - start
         )
 
@@ -287,7 +287,7 @@ class TestRunner:
             test_id="fake_quick",
             status=TestStatus.COMPLETED,
             message=report.summary,
-            data=report,
+            data=asdict(report),
             duration_seconds=time.time() - start
         )
 
@@ -337,6 +337,7 @@ class TestRunner:
                     status=TestStatus.SKIPPED,
                     message=f"Teste já em andamento ({pct}% restante)",
                     details=output,
+                    data=parsed,
                     duration_seconds=time.time() - start
                 )
 
@@ -346,6 +347,7 @@ class TestRunner:
                     status=TestStatus.SKIPPED,
                     message="SMART Short Test não suportado neste disco",
                     details=output,
+                    data=parsed,
                     duration_seconds=time.time() - start
                 )
 
@@ -533,6 +535,7 @@ class TestRunner:
                     status=TestStatus.COMPLETED,
                     message=f"Velocidade: {speed:.1f} MB/s ({status_msg})",
                     details=output,
+                    data=parsed,
                     duration_seconds=time.time() - start
                 )
 
@@ -609,6 +612,7 @@ class TestRunner:
 
             session._current_process = None
             output_lower = output.lower()
+            parsed = cls._parse_f3probe_output(output, session.device)
 
             if "good news" in output_lower:
                 return TestResult(
@@ -616,6 +620,7 @@ class TestRunner:
                     status=TestStatus.COMPLETED,
                     message="✓ Disco AUTÊNTICO confirmado",
                     details=output,
+                    data=parsed,
                     duration_seconds=time.time() - start
                 )
             elif "bad news" in output_lower or "fake" in output_lower:
@@ -624,6 +629,7 @@ class TestRunner:
                     status=TestStatus.FAILED,
                     message="✗ DISCO FALSO DETECTADO!",
                     details=output,
+                    data=parsed,
                     duration_seconds=time.time() - start
                 )
             elif "permission denied" in output_lower:
@@ -632,6 +638,7 @@ class TestRunner:
                     status=TestStatus.FAILED,
                     message="Sem permissão (execute como root)",
                     details=output,
+                    data=parsed,
                     duration_seconds=time.time() - start
                 )
 
@@ -650,6 +657,69 @@ class TestRunner:
                 message=f"Erro: {e}",
                 duration_seconds=time.time() - start
             )
+
+
+@staticmethod
+def _parse_f3probe_output(output: str, device: str) -> dict:
+    """Extrai evidências úteis do output do f3probe.
+
+    Retorna um dicionário simples, para ser usado em relatório/export JSON.
+    """
+    data = {
+        "device": device,
+        "is_fake": None,
+        "usable_size_human": None,
+        "usable_blocks": None,
+        "announced_size_human": None,
+        "announced_blocks": None,
+        "module_size_human": None,
+        "physical_block_size_bytes": None,
+        "last_sec": None,
+        "suggested_fix_command": None,
+    }
+
+    low = (output or "").lower()
+    if "good news" in low and "real thing" in low:
+        data["is_fake"] = False
+    if "bad news" in low or "fake" in low:
+        data["is_fake"] = True
+
+    # *Usable* size: 10.91 TB (23437770752 blocks)
+    m = re.search(r"\*Usable\* size:\s*([0-9.]+\s*\w+)\s*\((\d+)\s*blocks\)", output)
+    if m:
+        data["usable_size_human"] = m.group(1).strip()
+        data["usable_blocks"] = int(m.group(2))
+
+    m = re.search(r"Announced size:\s*([0-9.]+\s*\w+)\s*\((\d+)\s*blocks\)", output)
+    if m:
+        data["announced_size_human"] = m.group(1).strip()
+        data["announced_blocks"] = int(m.group(2))
+
+    m = re.search(r"Module:\s*([0-9.]+\s*\w+)", output)
+    if m:
+        data["module_size_human"] = m.group(1).strip()
+
+    # Physical block size: 512.00 Byte (2^9 Bytes)
+    m = re.search(r"Physical block size:\s*([0-9.]+)\s*Byte", output)
+    if m:
+        try:
+            data["physical_block_size_bytes"] = int(float(m.group(1)))
+        except Exception:
+            pass
+
+    # f3fix --last-sec=16477878 /dev/sde
+    m = re.search(r"--last-sec=(\d+)", output)
+    if m:
+        data["last_sec"] = int(m.group(1))
+
+    if data["last_sec"] is None and data.get("usable_blocks"):
+        # last sector = blocks - 1 (conforme exemplos do f3fix)
+        data["last_sec"] = int(data["usable_blocks"]) - 1
+
+    if data["last_sec"] is not None:
+        data["suggested_fix_command"] = f"sudo f3fix --last-sec={data['last_sec']} {device}"
+
+    return data
 
     @classmethod
     def _run_badblocks(cls, session: TestSession, mode: str) -> TestResult:
