@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════
-#  HddMonitor - Instalador automático
-#  Detecta a distro, instala dependências e cria atalho
-# ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -14,16 +10,14 @@ NC='\033[0m'
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$APP_DIR/.venv"
-MIN_PYTHON_MAJOR=3
-MIN_PYTHON_MINOR=8
 DESKTOP_FILE="$HOME/.local/share/applications/hddmonitor.desktop"
+PYTHON_CMD=""
 
 info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
 success() { echo -e "${GREEN}[OK]${NC}   $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERRO]${NC} $*"; exit 1; }
 
-# ── Detecta distro ──────────────────────────────────────────
 detect_distro() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -38,107 +32,274 @@ detect_distro() {
     info "Distro detectada: $DISTRO_NAME"
 }
 
-# ── Detecta melhor Python disponível (>= 3.8) ──────────────
-find_python() {
-    local candidates=(
-        python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3
-    )
-    for cmd in "${candidates[@]}"; do
+find_python311() {
+    for cmd in python3.11 python311; do
         if command -v "$cmd" &>/dev/null; then
             local ver
             ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || true)
-            if [ -n "$ver" ]; then
-                local major minor
-                major=$(echo "$ver" | cut -d. -f1)
-                minor=$(echo "$ver" | cut -d. -f2)
-                if [ "$major" -ge "$MIN_PYTHON_MAJOR" ] && [ "$minor" -ge "$MIN_PYTHON_MINOR" ]; then
-                    PYTHON_CMD="$cmd"
-                    PYTHON_VER="$ver"
-                    return 0
-                fi
+            if [ "$ver" = "3.11" ]; then
+                PYTHON_CMD="$(command -v "$cmd")"
+                return 0
             fi
         fi
     done
     return 1
 }
 
-# ── Instala pacotes do sistema ──────────────────────────────
-install_system_deps() {
-    info "Instalando dependências do sistema..."
+install_python311() {
+    info "Instalando Python 3.11..."
 
     case "$DISTRO_ID" in
-        opensuse*|sles)
-            sudo zypper install -y python3 python3-pip python3-venv python3-tk \
-                smartmontools hdparm e2fsprogs f3 || true
+        opensuse*|sles|regataos)
+            sudo zypper install -y python311 python311-pip python311-tk python311-venv 2>/dev/null \
+                || sudo zypper install -y python3.11 python3.11-pip python3.11-tk python3.11-venv 2>/dev/null \
+                || sudo zypper install -y python311-base python311-pip python311-tk 2>/dev/null \
+                || {
+                    warn "Pacote python311 não encontrado nos repos padrão."
+                    warn "Tentando via devel:languages:python..."
+                    sudo zypper ar -f "https://download.opensuse.org/repositories/devel:/languages:/python/openSUSE_Tumbleweed/" devel-python 2>/dev/null || true
+                    sudo zypper --gpg-auto-import-keys ref
+                    sudo zypper install -y python311 python311-pip python311-tk 2>/dev/null || true
+                }
             ;;
-        ubuntu|debian|linuxmint|pop)
+        ubuntu|pop)
             sudo apt update
-            sudo apt install -y python3 python3-pip python3-venv python3-tk \
-                smartmontools hdparm e2fsprogs f3 || true
+            if ! apt-cache show python3.11 &>/dev/null; then
+                info "Adicionando PPA deadsnakes..."
+                sudo apt install -y software-properties-common
+                sudo add-apt-repository -y ppa:deadsnakes/ppa
+                sudo apt update
+            fi
+            sudo apt install -y python3.11 python3.11-venv python3.11-tk python3.11-distutils
+            if ! python3.11 -m pip --version &>/dev/null; then
+                curl -sS https://bootstrap.pypa.io/get-pip.py | sudo python3.11
+            fi
+            ;;
+        debian)
+            sudo apt update
+            sudo apt install -y python3.11 python3.11-venv python3.11-tk 2>/dev/null || {
+                warn "python3.11 não disponível nos repos do Debian."
+                install_python311_from_source
+            }
+            ;;
+        linuxmint)
+            sudo apt update
+            if ! apt-cache show python3.11 &>/dev/null; then
+                sudo apt install -y software-properties-common
+                sudo add-apt-repository -y ppa:deadsnakes/ppa
+                sudo apt update
+            fi
+            sudo apt install -y python3.11 python3.11-venv python3.11-tk python3.11-distutils
+            if ! python3.11 -m pip --version &>/dev/null; then
+                curl -sS https://bootstrap.pypa.io/get-pip.py | sudo python3.11
+            fi
             ;;
         fedora)
-            sudo dnf install -y python3 python3-pip python3-tkinter \
-                smartmontools hdparm e2fsprogs f3 || true
+            sudo dnf install -y python3.11 python3.11-tkinter python3.11-pip 2>/dev/null || {
+                install_python311_from_source
+            }
             ;;
         arch|manjaro|endeavouros)
-            sudo pacman -Sy --noconfirm python python-pip tk \
-                smartmontools hdparm e2fsprogs f3 || true
+            if command -v yay &>/dev/null; then
+                yay -S --noconfirm python311 2>/dev/null || true
+            elif command -v paru &>/dev/null; then
+                paru -S --noconfirm python311 2>/dev/null || true
+            fi
+            if ! find_python311; then
+                install_python311_from_source
+            fi
             ;;
         *)
-            # Tenta adivinhar pelo ID_LIKE
             if echo "$DISTRO_LIKE" | grep -qi "suse"; then
-                sudo zypper install -y python3 python3-pip python3-venv python3-tk \
-                    smartmontools hdparm e2fsprogs f3 || true
+                sudo zypper install -y python311 python311-pip python311-tk 2>/dev/null || true
             elif echo "$DISTRO_LIKE" | grep -qi "debian\|ubuntu"; then
                 sudo apt update
-                sudo apt install -y python3 python3-pip python3-venv python3-tk \
-                    smartmontools hdparm e2fsprogs f3 || true
+                sudo apt install -y python3.11 python3.11-venv python3.11-tk 2>/dev/null || {
+                    sudo apt install -y software-properties-common
+                    sudo add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null || true
+                    sudo apt update
+                    sudo apt install -y python3.11 python3.11-venv python3.11-tk 2>/dev/null || true
+                }
             elif echo "$DISTRO_LIKE" | grep -qi "fedora\|rhel"; then
-                sudo dnf install -y python3 python3-pip python3-tkinter \
-                    smartmontools hdparm e2fsprogs f3 || true
+                sudo dnf install -y python3.11 python3.11-tkinter 2>/dev/null || true
             else
-                warn "Distro não reconhecida. Instale manualmente:"
-                warn "  Python 3.8+, pip, tkinter, smartmontools, hdparm, e2fsprogs, f3"
+                install_python311_from_source
             fi
             ;;
     esac
 }
 
-# ── Cria venv e instala deps Python ─────────────────────────
+install_python311_from_source() {
+    info "Compilando Python 3.11.9 do source..."
+
+    if command -v apt &>/dev/null; then
+        sudo apt install -y build-essential zlib1g-dev libncurses5-dev \
+            libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev \
+            libsqlite3-dev wget libbz2-dev tk-dev
+    elif command -v dnf &>/dev/null; then
+        sudo dnf groupinstall -y "Development Tools"
+        sudo dnf install -y zlib-devel bzip2-devel openssl-devel \
+            ncurses-devel sqlite-devel readline-devel tk-devel \
+            libffi-devel wget
+    elif command -v zypper &>/dev/null; then
+        sudo zypper install -y -t pattern devel_basis
+        sudo zypper install -y zlib-devel libbz2-devel libopenssl-devel \
+            ncurses-devel sqlite3-devel readline-devel tk-devel \
+            libffi-devel wget
+    elif command -v pacman &>/dev/null; then
+        sudo pacman -Sy --noconfirm base-devel openssl zlib tk sqlite wget
+    fi
+
+    local build_dir="/tmp/python311-build"
+    mkdir -p "$build_dir"
+    cd "$build_dir"
+
+    if [ ! -f "Python-3.11.9.tgz" ]; then
+        wget -q "https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz"
+    fi
+    tar xzf Python-3.11.9.tgz
+    cd Python-3.11.9
+
+    ./configure --enable-optimizations --prefix=/usr/local 2>&1 | tail -5
+    make -j"$(nproc)" 2>&1 | tail -5
+    sudo make altinstall 2>&1 | tail -5
+
+    cd "$APP_DIR"
+    rm -rf "$build_dir"
+
+    if command -v python3.11 &>/dev/null; then
+        success "Python 3.11 compilado e instalado em /usr/local/bin/python3.11"
+    else
+        error "Falha ao compilar Python 3.11. Instale manualmente."
+    fi
+}
+
+ensure_tkinter() {
+    info "Verificando tkinter para Python 3.11..."
+
+    if "$PYTHON_CMD" -c "import tkinter" 2>/dev/null; then
+        success "tkinter disponível"
+        return 0
+    fi
+
+    warn "tkinter não encontrado. Instalando..."
+
+    case "$DISTRO_ID" in
+        opensuse*|sles|regataos)
+            sudo zypper install -y python311-tk 2>/dev/null \
+                || sudo zypper install -y python3-tk 2>/dev/null \
+                || true
+            ;;
+        ubuntu|debian|linuxmint|pop)
+            sudo apt install -y python3.11-tk 2>/dev/null \
+                || sudo apt install -y python3-tk 2>/dev/null \
+                || true
+            ;;
+        fedora)
+            sudo dnf install -y python3.11-tkinter 2>/dev/null \
+                || sudo dnf install -y python3-tkinter 2>/dev/null \
+                || true
+            ;;
+        arch|manjaro|endeavouros)
+            sudo pacman -Sy --noconfirm tk 2>/dev/null || true
+            ;;
+        *)
+            if echo "$DISTRO_LIKE" | grep -qi "suse"; then
+                sudo zypper install -y python311-tk 2>/dev/null || true
+            elif echo "$DISTRO_LIKE" | grep -qi "debian\|ubuntu"; then
+                sudo apt install -y python3.11-tk 2>/dev/null || true
+            elif echo "$DISTRO_LIKE" | grep -qi "fedora\|rhel"; then
+                sudo dnf install -y python3.11-tkinter 2>/dev/null || true
+            fi
+            ;;
+    esac
+
+    if "$PYTHON_CMD" -c "import tkinter" 2>/dev/null; then
+        success "tkinter instalado com sucesso"
+    else
+        error "Não foi possível instalar tkinter para Python 3.11.\n   Instale manualmente: sudo zypper install python311-tk"
+    fi
+}
+
+install_system_tools() {
+    info "Instalando ferramentas de diagnóstico..."
+
+    case "$DISTRO_ID" in
+        opensuse*|sles|regataos)
+            sudo zypper install -y smartmontools hdparm e2fsprogs f3 || true
+            ;;
+        ubuntu|debian|linuxmint|pop)
+            sudo apt install -y smartmontools hdparm e2fsprogs f3 || true
+            ;;
+        fedora)
+            sudo dnf install -y smartmontools hdparm e2fsprogs f3 || true
+            ;;
+        arch|manjaro|endeavouros)
+            sudo pacman -Sy --noconfirm smartmontools hdparm e2fsprogs f3 || true
+            ;;
+        *)
+            if echo "$DISTRO_LIKE" | grep -qi "suse"; then
+                sudo zypper install -y smartmontools hdparm e2fsprogs f3 || true
+            elif echo "$DISTRO_LIKE" | grep -qi "debian\|ubuntu"; then
+                sudo apt install -y smartmontools hdparm e2fsprogs f3 || true
+            elif echo "$DISTRO_LIKE" | grep -qi "fedora\|rhel"; then
+                sudo dnf install -y smartmontools hdparm e2fsprogs f3 || true
+            else
+                warn "Instale manualmente: smartmontools hdparm e2fsprogs f3"
+            fi
+            ;;
+    esac
+}
+
 setup_venv() {
-    info "Configurando ambiente virtual Python..."
+    info "Configurando ambiente virtual com Python 3.11..."
+
+    if [ -d "$VENV_DIR" ]; then
+        local venv_python
+        venv_python=$("$VENV_DIR/bin/python" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0")
+        if [ "$venv_python" != "3.11" ]; then
+            warn "Venv existente usa Python $venv_python. Recriando com 3.11..."
+            rm -rf "$VENV_DIR"
+        fi
+    fi
 
     if [ ! -d "$VENV_DIR" ]; then
-        "$PYTHON_CMD" -m venv "$VENV_DIR" 2>/dev/null || {
-            # Fallback: tenta sem venv (algumas distros não incluem por padrão)
-            warn "Falha ao criar venv. Tentando instalar python3-venv..."
+        "$PYTHON_CMD" -m venv "$VENV_DIR" --system-site-packages 2>/dev/null || {
+            warn "Falha ao criar venv. Instalando módulo venv..."
             case "$DISTRO_ID" in
                 ubuntu|debian|linuxmint|pop)
-                    sudo apt install -y python3-venv
+                    sudo apt install -y python3.11-venv
                     ;;
-                opensuse*|sles)
-                    sudo zypper install -y python3-venv
+                opensuse*|sles|regataos)
+                    sudo zypper install -y python311-venv 2>/dev/null || true
                     ;;
             esac
-            "$PYTHON_CMD" -m venv "$VENV_DIR" || error "Não foi possível criar o ambiente virtual"
+            "$PYTHON_CMD" -m venv "$VENV_DIR" --system-site-packages || error "Não foi possível criar o ambiente virtual com Python 3.11"
         }
     fi
 
-    # Ativa e instala
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip -q
-    pip install customtkinter psutil -q
+    pip install -r "$APP_DIR/requirements.txt" -q
     deactivate
-    success "Dependências Python instaladas no venv"
+
+    local venv_ver
+    venv_ver=$("$VENV_DIR/bin/python" --version 2>&1)
+    success "Venv configurado: $venv_ver"
+
+    info "Verificando tkinter dentro do venv..."
+    if "$VENV_DIR/bin/python" -c "import tkinter" 2>/dev/null; then
+        success "tkinter acessível no venv"
+    else
+        error "tkinter não acessível no venv.\n   Instale: sudo zypper install python311-tk\n   Depois rode: rm -rf .venv && bash install.sh"
+    fi
 }
 
-# ── Cria script launcher ────────────────────────────────────
 create_launcher() {
     info "Criando launcher..."
 
     cat > "$APP_DIR/run.sh" << 'LAUNCHER'
 #!/usr/bin/env bash
-# HddMonitor - Launcher
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$APP_DIR/.venv"
 
@@ -150,10 +311,16 @@ fi
 
 PYTHON="$VENV_DIR/bin/python"
 
-# Verifica se precisa de sudo para SMART completo
+PY_VER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+if [ "$PY_VER" != "3.11" ]; then
+    echo "⚠️  Venv não está com Python 3.11 (encontrado: $PY_VER)"
+    echo "   Execute: bash install.sh"
+    exit 1
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
     echo ""
-    echo "💡 Para acesso SMART completo, use:"
+    echo "💡 Para acesso SMART completo:"
     echo "   sudo -E bash run.sh"
     echo ""
     echo "   Iniciando sem sudo (funcionalidade limitada)..."
@@ -167,7 +334,6 @@ LAUNCHER
     success "Launcher criado: run.sh"
 }
 
-# ── Cria atalho .desktop ────────────────────────────────────
 create_desktop_entry() {
     info "Criando atalho no menu de aplicativos..."
 
@@ -185,7 +351,6 @@ Categories=System;Monitor;
 Keywords=disk;hdd;ssd;nvme;smart;diagnostic;
 EOF
 
-    # Também cria uma versão sem pkexec (sem root)
     cat > "${DESKTOP_FILE%.desktop}-noroot.desktop" << EOF
 [Desktop Entry]
 Name=HDD Monitor (sem root)
@@ -202,69 +367,50 @@ EOF
     success "Atalho criado no menu de aplicativos"
 }
 
-# ── Verifica ferramentas opcionais ──────────────────────────
 check_tools() {
     echo ""
-    info "Verificando ferramentas do sistema:"
+    info "Verificando ferramentas:"
     local tools=("smartctl:smartmontools" "hdparm:hdparm" "badblocks:e2fsprogs" "f3probe:f3")
-    local missing=()
     for entry in "${tools[@]}"; do
         local cmd="${entry%%:*}"
         local pkg="${entry##*:}"
         if command -v "$cmd" &>/dev/null; then
-            success "  $cmd encontrado"
+            success "  $cmd"
         else
             warn "  $cmd NÃO encontrado (pacote: $pkg)"
-            missing+=("$pkg")
         fi
     done
-    if [ ${#missing[@]} -gt 0 ]; then
-        warn "Pacotes faltando (opcional): ${missing[*]}"
-    fi
 }
 
-# ═══════════════════════════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-echo -e "${BOLD}  💾 HddMonitor - Instalador                  ${NC}"
+echo -e "${BOLD}  💾 HddMonitor - Instalador (Python 3.11)    ${NC}"
 echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
 echo ""
 
 detect_distro
 
-# 1. Python disponível?
-if find_python; then
-    success "Python encontrado: $PYTHON_CMD ($PYTHON_VER)"
+if find_python311; then
+    success "Python 3.11 encontrado: $PYTHON_CMD"
 else
-    warn "Python >= $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR não encontrado. Instalando..."
-    install_system_deps
-    if ! find_python; then
-        error "Não foi possível instalar Python. Instale manualmente: python3 >= 3.8"
+    warn "Python 3.11 não encontrado. Instalando..."
+    install_python311
+    if ! find_python311; then
+        error "Não foi possível instalar Python 3.11. Instale manualmente e rode novamente."
     fi
-    success "Python instalado: $PYTHON_CMD ($PYTHON_VER)"
+    success "Python 3.11 instalado: $PYTHON_CMD"
 fi
 
-# 2. Instala deps do sistema (smartmontools, etc)
-install_system_deps
-
-# 3. Configura venv + deps Python
+ensure_tkinter
+install_system_tools
 setup_venv
-
-# 4. Cria launcher
 create_launcher
-
-# 5. Cria atalho .desktop
 create_desktop_entry
-
-# 6. Verifica ferramentas
 check_tools
 
-# Resultado final
 echo ""
 echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
-echo -e "${GREEN}${BOLD}  ✅ Instalação concluída!${NC}"
+echo -e "${GREEN}${BOLD}  ✅ Instalação concluída! (Python 3.11)${NC}"
 echo -e "${BOLD}═══════════════════════════════════════════════${NC}"
 echo ""
 echo -e "  Para executar:"
