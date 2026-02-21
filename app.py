@@ -70,13 +70,13 @@ class HddMonitorApp(ctk.CTk):
 def check_dependencies():
     warnings = []
     if not Path(SMARTCTL_PATH).exists():
-        warnings.append("smartctl não encontrado → sudo zypper install smartmontools")
+        warnings.append("smartctl não encontrado → instale smartmontools")
     if not Path(HDPARM_PATH).exists():
-        warnings.append("hdparm não encontrado → sudo zypper install hdparm")
+        warnings.append("hdparm não encontrado → instale hdparm")
     if not Path(BADBLOCKS_PATH).exists():
-        warnings.append("badblocks não encontrado → sudo zypper install e2fsprogs")
+        warnings.append("badblocks não encontrado → instale e2fsprogs")
     if not Path(F3PROBE_PATH).exists():
-        warnings.append("f3probe não encontrado (opcional) → sudo zypper install f3")
+        warnings.append("f3probe não encontrado (opcional) → instale f3")
     return warnings
 
 
@@ -90,35 +90,28 @@ def main():
         print("\n⚠️  Avisos de dependências:")
         for w in warnings:
             print(f"   • {w}")
-        print()
+        print("   Dica: execute 'bash install.sh' para instalar tudo automaticamente\n")
 
     try:
         import customtkinter
     except ImportError:
         print("❌ customtkinter não instalado!")
-        print("   pip3.11 install --user customtkinter")
+        print("   Execute: bash install.sh")
         sys.exit(1)
 
     # Verifica se está rodando como root
     is_root = os.geteuid() == 0
-    
-    # Verifica se tem display (X11)
-    has_display = os.environ.get('DISPLAY')
-    
+
+    # Verifica se tem display (X11/Wayland)
+    has_display = os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')
+
     if is_root and not has_display:
         print("\n❌ Erro: sudo não herda o ambiente gráfico ($DISPLAY)")
-        print("\n   Use uma destas opções:\n")
-        print("   1. Preservar ambiente (recomendado):")
-        print("      sudo -E python3.11 app.py")
-        print("")
-        print("   2. Ou rode sem sudo (funciona para a maioria dos recursos):")
-        print("      python3.11 app.py")
-        print("")
+        print("\n   Use: sudo -E bash run.sh\n")
         sys.exit(1)
-    
+
     if not is_root:
-        print("\n💡 Dica: Para acesso SMART completo, use:")
-        print("   sudo -E python3.11 app.py\n")
+        print("\n💡 Para acesso SMART completo: sudo -E bash run.sh\n")
 
     try:
         app = HddMonitorApp()

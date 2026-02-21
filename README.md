@@ -2,9 +2,37 @@
 
 Ferramenta gráfica para diagnóstico e monitoramento de discos rígidos (HDD/SSD/NVMe) no Linux.
 
-![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/Platform-Linux-orange.svg)
+
+## 🚀 Instalação Rápida
+
+```bash
+git clone https://github.com/seu-usuario/hddmonitor.git
+cd hddmonitor
+bash install.sh
+```
+
+O instalador detecta sua distro automaticamente e instala tudo: Python, dependências do sistema, bibliotecas Python (em venv isolado) e cria atalho no menu.
+
+### Distros suportadas
+- openSUSE / Regata OS / SLES
+- Ubuntu / Debian / Linux Mint / Pop!_OS
+- Fedora / RHEL / CentOS
+- Arch / Manjaro / EndeavourOS
+
+### Executar
+
+```bash
+# Sem root (funcionalidade limitada)
+bash run.sh
+
+# Com root (acesso SMART completo - recomendado)
+sudo -E bash run.sh
+```
+
+Ou pelo menu de aplicativos: **HDD Monitor**
 
 ## ✨ Funcionalidades
 
@@ -28,86 +56,36 @@ Ferramenta gráfica para diagnóstico e monitoramento de discos rígidos (HDD/SS
 
 ## 🔧 Requisitos
 
-### Sistema
-- Linux (testado em openSUSE, Ubuntu, Fedora)
-- Python 3.11+
+- Linux (qualquer distro moderna)
+- Python 3.8+ (instalado automaticamente pelo `install.sh`)
 - Acesso root (sudo) para leitura SMART
-
-### Dependências Python
-```bash
-pip3.11 install --user customtkinter psutil
-```
-
-### Ferramentas do Sistema
-```bash
-# openSUSE
-sudo zypper install smartmontools hdparm e2fsprogs f3
-
-# Ubuntu/Debian
-sudo apt install smartmontools hdparm e2fsprogs f3
-
-# Fedora
-sudo dnf install smartmontools hdparm e2fsprogs f3
-```
-
-## 🚀 Instalação
-
-```bash
-# Clone o repositório
-git clone https://github.com/seu-usuario/hddmonitor.git
-cd hddmonitor
-
-# Instale dependências Python
-pip3.11 install --user customtkinter psutil
-
-# Execute (com acesso SMART completo)
-sudo -E python3.11 app.py
-
-# Ou sem sudo (funcionalidade limitada)
-python3.11 app.py
-```
-
-> ⚠️ **Importante:** Use `sudo -E` (não apenas `sudo`) para preservar o ambiente gráfico ($DISPLAY).
 
 ## 📁 Estrutura do Projeto
 
 ```
 hddmonitor/
+├── install.sh                # Instalador automático
+├── run.sh                    # Launcher (criado pelo install.sh)
 ├── app.py                    # Ponto de entrada principal
 ├── core/
-│   ├── __init__.py
 │   ├── config.py             # Configurações e constantes
 │   ├── disk_service.py       # Serviço de detecção de discos
 │   ├── smart_parser.py       # Parser de dados SMART
 │   ├── health_score.py       # Cálculo de pontuação de saúde
 │   ├── fake_detector.py      # Detecção de discos falsificados
+│   ├── fake_remediation.py   # Ações pós-detecção de fake
 │   └── test_runner.py        # Executor de testes diagnósticos
 ├── ui/
-│   ├── __init__.py
 │   ├── components.py         # Componentes UI reutilizáveis
 │   ├── dashboard.py          # Tela principal
 │   ├── diagnostic_wizard.py  # Assistente de diagnóstico
 │   ├── diagnostic_controller.py
 │   ├── diagnostic_service.py
+│   ├── fake_action_panel.py  # Painel de ações para disco fake
 │   └── report_generator.py   # Gerador de relatórios HTML
+├── requirements.txt
+├── LICENSE
 └── README.md
-```
-
-## 🎯 Uso
-
-### Execução
-```bash
-# Com acesso SMART completo (recomendado)
-sudo -E python3.11 app.py
-
-# Sem sudo (funcionalidade limitada)
-python3.11 app.py
-```
-
-### Corrigir permissões (se necessário)
-Se você rodou com `sudo` antes e agora tem problemas de permissão:
-```bash
-sudo chown -R $USER:$USER ~/Documents/hddmonitor-reports/
 ```
 
 ### Testes Disponíveis
@@ -126,37 +104,29 @@ sudo chown -R $USER:$USER ~/Documents/hddmonitor-reports/
 
 > ⚠️ **Atenção:** Testes marcados como destrutivos APAGAM TODOS OS DADOS do disco!
 
-## 🔒 Segurança
-
-- Sempre faça backup antes de executar testes destrutivos
-- Execute como root apenas quando necessário
-- Desmonte o disco antes de testes que exigem acesso exclusivo
-
 ## 🐛 Troubleshooting
 
 ### "no display name and no $DISPLAY environment variable"
-- **Causa:** `sudo` não herda variáveis de ambiente
-- **Solução:** Use `sudo -E python3.11 app.py` (com `-E`)
+Use `sudo -E bash run.sh` (com `-E`)
 
 ### Permissão negada ao gerar relatório
-- **Causa:** Pasta criada pelo root em execução anterior
-- **Solução:** 
-  ```bash
-  sudo chown -R $USER:$USER ~/Documents/hddmonitor-reports/
-  ```
+```bash
+sudo chown -R $USER:$USER ~/Documents/hddmonitor-reports/
+```
 
 ### Temperatura mostra N/A
 - Verifique se o smartmontools está instalado
 - Alguns discos USB não suportam leitura de temperatura
-- Tente: `sudo smartctl -a /dev/sdX`
-
-### Permissão negada
-- Execute com `sudo`
-- Verifique se o usuário está no grupo `disk`
 
 ### Disco não aparece
-- Verifique se está montado: `lsblk`
-- Pode ser filtrado (loop, snap, tmpfs são ignorados)
+- Verifique se está conectado: `lsblk`
+- Dispositivos loop, snap e tmpfs são filtrados automaticamente
+
+### Reinstalar do zero
+```bash
+rm -rf .venv
+bash install.sh
+```
 
 ## 📝 Licença
 

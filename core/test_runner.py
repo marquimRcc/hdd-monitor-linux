@@ -337,7 +337,6 @@ class TestRunner:
                     status=TestStatus.SKIPPED,
                     message=f"Teste já em andamento ({pct}% restante)",
                     details=output,
-                    data=parsed,
                     duration_seconds=time.time() - start
                 )
 
@@ -347,7 +346,6 @@ class TestRunner:
                     status=TestStatus.SKIPPED,
                     message="SMART Short Test não suportado neste disco",
                     details=output,
-                    data=parsed,
                     duration_seconds=time.time() - start
                 )
 
@@ -403,7 +401,7 @@ class TestRunner:
                         details=check_result.stdout,
                         duration_seconds=time.time() - start
                     )
-            except:
+            except Exception:
                 pass
 
         return TestResult(
@@ -463,7 +461,7 @@ class TestRunner:
                            f"bs={sample_size}", "count=1",
                            f"skip={offset // sample_size}", "iflag=direct"]
                     subprocess.run(cmd, capture_output=True, timeout=30)
-                except:
+                except Exception:
                     errors += 1
 
             if errors > 0:
@@ -498,9 +496,6 @@ class TestRunner:
             session.on_progress(test_id, 10, "Medindo velocidade...")
 
         try:
-            # Lê 100MB
-            test_size = 100 * 1024 * 1024
-
             cmd = ["dd", f"if={session.device}", "of=/dev/null",
                    "bs=1M", "count=100", "iflag=direct"]
 
@@ -535,7 +530,7 @@ class TestRunner:
                     status=TestStatus.COMPLETED,
                     message=f"Velocidade: {speed:.1f} MB/s ({status_msg})",
                     details=output,
-                    data=parsed,
+                    data={"speed_mbps": speed, "rating": status_msg},
                     duration_seconds=time.time() - start
                 )
 
@@ -647,6 +642,7 @@ class TestRunner:
                 status=TestStatus.COMPLETED,
                 message="Teste concluído",
                 details=output,
+                data=parsed,
                 duration_seconds=time.time() - start
             )
 
@@ -658,68 +654,60 @@ class TestRunner:
                 duration_seconds=time.time() - start
             )
 
+    @staticmethod
+    def _parse_f3probe_output(output: str, device: str) -> dict:
+        """Extrai evidências úteis do output do f3probe."""
+        data = {
+            "device": device,
+            "is_fake": None,
+            "usable_size_human": None,
+            "usable_blocks": None,
+            "announced_size_human": None,
+            "announced_blocks": None,
+            "module_size_human": None,
+            "physical_block_size_bytes": None,
+            "last_sec": None,
+            "suggested_fix_command": None,
+        }
 
-@staticmethod
-def _parse_f3probe_output(output: str, device: str) -> dict:
-    """Extrai evidências úteis do output do f3probe.
+        low = (output or "").lower()
+        if "good news" in low and "real thing" in low:
+            data["is_fake"] = False
+        if "bad news" in low or "fake" in low:
+            data["is_fake"] = True
 
-    Retorna um dicionário simples, para ser usado em relatório/export JSON.
-    """
-    data = {
-        "device": device,
-        "is_fake": None,
-        "usable_size_human": None,
-        "usable_blocks": None,
-        "announced_size_human": None,
-        "announced_blocks": None,
-        "module_size_human": None,
-        "physical_block_size_bytes": None,
-        "last_sec": None,
-        "suggested_fix_command": None,
-    }
+        m = re.search(r"\*Usable\* size:\s*([0-9.]+\s*\w+)\s*\((\d+)\s*blocks\)", output)
+        if m:
+            data["usable_size_human"] = m.group(1).strip()
+            data["usable_blocks"] = int(m.group(2))
 
-    low = (output or "").lower()
-    if "good news" in low and "real thing" in low:
-        data["is_fake"] = False
-    if "bad news" in low or "fake" in low:
-        data["is_fake"] = True
+        m = re.search(r"Announced size:\s*([0-9.]+\s*\w+)\s*\((\d+)\s*blocks\)", output)
+        if m:
+            data["announced_size_human"] = m.group(1).strip()
+            data["announced_blocks"] = int(m.group(2))
 
-    # *Usable* size: 10.91 TB (23437770752 blocks)
-    m = re.search(r"\*Usable\* size:\s*([0-9.]+\s*\w+)\s*\((\d+)\s*blocks\)", output)
-    if m:
-        data["usable_size_human"] = m.group(1).strip()
-        data["usable_blocks"] = int(m.group(2))
+        m = re.search(r"Module:\s*([0-9.]+\s*\w+)", output)
+        if m:
+            data["module_size_human"] = m.group(1).strip()
 
-    m = re.search(r"Announced size:\s*([0-9.]+\s*\w+)\s*\((\d+)\s*blocks\)", output)
-    if m:
-        data["announced_size_human"] = m.group(1).strip()
-        data["announced_blocks"] = int(m.group(2))
+        m = re.search(r"Physical block size:\s*([0-9.]+)\s*Byte", output)
+        if m:
+            try:
+                data["physical_block_size_bytes"] = int(float(m.group(1)))
+            except Exception:
+                pass
 
-    m = re.search(r"Module:\s*([0-9.]+\s*\w+)", output)
-    if m:
-        data["module_size_human"] = m.group(1).strip()
+        m = re.search(r"--last-sec=(\d+)", output)
+        if m:
+            data["last_sec"] = int(m.group(1))
 
-    # Physical block size: 512.00 Byte (2^9 Bytes)
-    m = re.search(r"Physical block size:\s*([0-9.]+)\s*Byte", output)
-    if m:
-        try:
-            data["physical_block_size_bytes"] = int(float(m.group(1)))
-        except Exception:
-            pass
+        if data["last_sec"] is None and data.get("usable_blocks"):
+            data["last_sec"] = int(data["usable_blocks"]) - 1
 
-    # f3fix --last-sec=16477878 /dev/sde
-    m = re.search(r"--last-sec=(\d+)", output)
-    if m:
-        data["last_sec"] = int(m.group(1))
+        if data["last_sec"] is not None:
+            data["suggested_fix_command"] = f"sudo f3fix --last-sec={data['last_sec']} {device}"
 
-    if data["last_sec"] is None and data.get("usable_blocks"):
-        # last sector = blocks - 1 (conforme exemplos do f3fix)
-        data["last_sec"] = int(data["usable_blocks"]) - 1
-
-    if data["last_sec"] is not None:
-        data["suggested_fix_command"] = f"sudo f3fix --last-sec={data['last_sec']} {device}"
-
-    return data
+        return data
 
     @classmethod
     def _run_badblocks(cls, session: TestSession, mode: str) -> TestResult:
@@ -797,7 +785,7 @@ def _parse_f3probe_output(output: str, device: str) -> dict:
                     session._current_process.terminate()
                     try:
                         session._current_process.wait(timeout=5)
-                    except:
+                    except Exception:
                         session._current_process.kill()
                     return TestResult(
                         test_id=test_id,
@@ -873,9 +861,9 @@ def _parse_f3probe_output(output: str, device: str) -> dict:
             try:
                 session._current_process.terminate()
                 session._current_process.wait(timeout=5)
-            except:
+            except Exception:
                 try:
                     session._current_process.kill()
-                except:
+                except Exception:
                     pass
             session._current_process = None

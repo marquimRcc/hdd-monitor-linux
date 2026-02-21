@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Union
 
 from core.config import REPORT_DIR
-from core.test_runner import TestResult
+from core.test_runner import TestResult, AVAILABLE_TESTS
 
 
 def _escape_html(s: str) -> str:
@@ -21,6 +21,12 @@ def _pretty_json(data: Any) -> str:
         return str(data)
 
 
+def _get_test_name(test_id: str) -> str:
+    """Retorna nome legível do teste pelo ID"""
+    t = AVAILABLE_TESTS.get(test_id)
+    return t.name if t else test_id
+
+
 def _normalize_results(session_results: Any) -> List[Dict[str, Any]]:
     """Aceita diferentes formatos usados pela app e normaliza para list[dict]."""
     results: List[Dict[str, Any]] = []
@@ -28,13 +34,13 @@ def _normalize_results(session_results: Any) -> List[Dict[str, Any]]:
     if session_results is None:
         return results
 
-    # Caso antigo: dict[test_id] = TestResult
+    # Caso: dict[test_id] = TestResult
     if isinstance(session_results, dict):
         for test_id, r in session_results.items():
             if isinstance(r, TestResult):
                 results.append({
                     "test_id": r.test_id,
-                    "name": r.name,
+                    "name": _get_test_name(r.test_id),
                     "status": str(r.status),
                     "message": r.message,
                     "details": r.details,
@@ -44,16 +50,17 @@ def _normalize_results(session_results: Any) -> List[Dict[str, Any]]:
             elif isinstance(r, dict):
                 rr = dict(r)
                 rr.setdefault("test_id", test_id)
+                rr.setdefault("name", _get_test_name(test_id))
                 results.append(rr)
         return results
 
-    # Caso novo: list[TestResult]
+    # Caso: list[TestResult] ou list[dict]
     if isinstance(session_results, list):
         for r in session_results:
             if isinstance(r, TestResult):
                 results.append({
                     "test_id": r.test_id,
-                    "name": r.name,
+                    "name": _get_test_name(r.test_id),
                     "status": str(r.status),
                     "message": r.message,
                     "details": r.details,
@@ -61,7 +68,9 @@ def _normalize_results(session_results: Any) -> List[Dict[str, Any]]:
                     "duration_seconds": r.duration_seconds,
                 })
             elif isinstance(r, dict):
-                results.append(r)
+                rr = dict(r)
+                rr.setdefault("name", _get_test_name(rr.get("test_id", "")))
+                results.append(rr)
         return results
 
     return results
@@ -81,11 +90,11 @@ class HTMLReportGenerator:
 
         disk_info_dict: Dict[str, Any] = {"device": device}
         if disk_info:
-            # suporta objeto com atributos (DiskInfo) ou dict
             if isinstance(disk_info, dict):
                 disk_info_dict.update({k: v for k, v in disk_info.items() if v is not None})
             else:
-                for attr in ["model", "serial", "size", "transport", "mount_point", "fstype", "health_score", "temperature"]:
+                for attr in ["model", "serial", "total_gb", "disk_type", "mount_point",
+                             "health", "temp", "firmware", "smart_supported", "smart_enabled"]:
                     try:
                         v = getattr(disk_info, attr, None)
                         if v is not None:

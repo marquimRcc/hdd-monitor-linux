@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import customtkinter as ctk
+import subprocess
 import threading
 from typing import Optional, List, Dict
 import time
@@ -36,11 +37,11 @@ def format_duration(seconds: float) -> str:
     """Formata duração em formato legível (horas quando > 60min)"""
     if seconds < 60:
         return f"{int(seconds)}s"
-    elif seconds < 3600:  # Menos de 1 hora
+    elif seconds < 3600:
         mins = int(seconds) // 60
         secs = int(seconds) % 60
         return f"{mins}m{secs:02d}s"
-    else:  # 1 hora ou mais
+    else:
         hours = int(seconds) // 3600
         mins = (int(seconds) % 3600) // 60
         return f"{hours}h{mins:02d}m"
@@ -57,10 +58,11 @@ class DiagnosticWizard(ctk.CTkToplevel):
         self.advanced_mode = False
         self.report_btn = None
         self.report_path_label = None
+        self.report_status_label = None
         self.current_test_name = ""
         self.start_time = 0
         self._temp_monitor_active = False
-        
+
         # Timer de progresso independente
         self._progress_timer_active = False
         self._current_test_progress = 0
@@ -114,22 +116,22 @@ class DiagnosticWizard(ctk.CTkToplevel):
         # ══════════════════════════════════════════════════════════════
         info_card = ctk.CTkFrame(self.main_scroll, fg_color=COLOR_CARD_BG, corner_radius=10)
         info_card.pack(fill="x", pady=(0, 10))
-        
+
         info_inner = ctk.CTkFrame(info_card, fg_color="transparent")
         info_inner.pack(fill="x", padx=20, pady=15)
         info_inner.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
-        
+
         # Coluna 1: Tipo (badge grande)
         type_frame = ctk.CTkFrame(info_inner, fg_color="transparent")
         type_frame.grid(row=0, column=0, sticky="w")
-        
+
         disk_type = self.disk_info.disk_type if self.disk_info else "?"
         type_color = {
-            "NVMe": "#9b59b6",  # Roxo
-            "SSD": "#3498db",   # Azul
-            "HDD": "#e67e22",   # Laranja
+            "NVMe": "#9b59b6",
+            "SSD": "#3498db",
+            "HDD": "#e67e22",
         }.get(disk_type, COLOR_NA)
-        
+
         self.type_badge = ctk.CTkLabel(
             type_frame,
             text=disk_type,
@@ -140,44 +142,44 @@ class DiagnosticWizard(ctk.CTkToplevel):
             padx=12, pady=4
         )
         self.type_badge.pack()
-        
+
         ctk.CTkLabel(
             type_frame,
             text="Tipo",
             font=ctk.CTkFont(size=10),
             text_color=COLOR_TEXT_GRAY
         ).pack(pady=(2, 0))
-        
+
         # Coluna 2: Capacidade
         cap_frame = ctk.CTkFrame(info_inner, fg_color="transparent")
         cap_frame.grid(row=0, column=1, sticky="w", padx=10)
-        
+
         capacity = f"{self.disk_info.total_gb:.0f} GB" if self.disk_info and self.disk_info.total_gb else "N/A"
         if self.disk_info and self.disk_info.total_gb and self.disk_info.total_gb >= 1000:
             capacity = f"{self.disk_info.total_gb / 1024:.1f} TB"
-        
+
         ctk.CTkLabel(
             cap_frame,
             text=capacity,
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLOR_TEXT_LIGHT
         ).pack()
-        
+
         ctk.CTkLabel(
             cap_frame,
             text="Capacidade",
             font=ctk.CTkFont(size=10),
             text_color=COLOR_TEXT_GRAY
         ).pack()
-        
+
         # Coluna 3: Temperatura (tempo real)
         temp_frame = ctk.CTkFrame(info_inner, fg_color="transparent")
         temp_frame.grid(row=0, column=2, sticky="w", padx=10)
-        
+
         temp = self.disk_info.temp if self.disk_info else None
         temp_text = f"{temp}°C" if temp else "N/A"
         temp_color = self._temp_color(temp)
-        
+
         self.temp_label = ctk.CTkLabel(
             temp_frame,
             text=temp_text,
@@ -185,21 +187,21 @@ class DiagnosticWizard(ctk.CTkToplevel):
             text_color=temp_color
         )
         self.temp_label.pack()
-        
+
         ctk.CTkLabel(
             temp_frame,
             text="Temperatura",
             font=ctk.CTkFont(size=10),
             text_color=COLOR_TEXT_GRAY
         ).pack()
-        
+
         # Coluna 4: Saúde Score
         health_frame = ctk.CTkFrame(info_inner, fg_color="transparent")
         health_frame.grid(row=0, column=3, sticky="w", padx=10)
-        
+
         smart = SmartParser.parse(self.device)
         health = calculate_health(smart)
-        
+
         self.health_score_label = ctk.CTkLabel(
             health_frame,
             text=f"{health.score}%",
@@ -207,18 +209,18 @@ class DiagnosticWizard(ctk.CTkToplevel):
             text_color=health.color
         )
         self.health_score_label.pack()
-        
+
         ctk.CTkLabel(
             health_frame,
             text="Saúde",
             font=ctk.CTkFont(size=10),
             text_color=COLOR_TEXT_GRAY
         ).pack()
-        
+
         # Coluna 5: Status (badge)
         status_frame = ctk.CTkFrame(info_inner, fg_color="transparent")
         status_frame.grid(row=0, column=4, sticky="e")
-        
+
         self.health_badge = ctk.CTkLabel(
             status_frame,
             text=f"{health.icon} {health.label}",
@@ -229,7 +231,7 @@ class DiagnosticWizard(ctk.CTkToplevel):
             padx=12, pady=4
         )
         self.health_badge.pack()
-        
+
         # Inicia monitoramento de temperatura
         self._start_temp_monitor()
 
@@ -250,30 +252,26 @@ class DiagnosticWizard(ctk.CTkToplevel):
         # Progresso
         self.progress_frame = ctk.CTkFrame(self.main_scroll, fg_color=COLOR_CARD_BG, corner_radius=10)
         self.progress_frame.pack(fill="x", pady=(0, 10))
-        
-        # Header do progresso com label do teste e status
+
         progress_header = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
         progress_header.pack(fill="x", padx=20, pady=(12, 0))
-        
-        # Lado esquerdo: "📊 Progresso • Teste Atual"
+
         left_frame = ctk.CTkFrame(progress_header, fg_color="transparent")
         left_frame.pack(side="left")
-        
-        ctk.CTkLabel(left_frame, text="📊 Progresso", 
+
+        ctk.CTkLabel(left_frame, text="📊 Progresso",
                      font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
-        
-        self.selection_label = ctk.CTkLabel(left_frame, text="", 
+
+        self.selection_label = ctk.CTkLabel(left_frame, text="",
                                             font=ctk.CTkFont(size=12),
                                             text_color=COLOR_TEXT_GRAY)
         self.selection_label.pack(side="left", padx=(8, 0))
-        
-        # Lado direito: "Executando Testes... (30%)"
+
         self.progress_status = ctk.CTkLabel(progress_header, text="",
                                             font=ctk.CTkFont(size=12, weight="bold"),
                                             text_color=COLOR_INFO)
         self.progress_status.pack(side="right")
-        
-        # Barra de progresso geral
+
         self.overall_progress = ctk.CTkProgressBar(self.progress_frame, height=6)
         self.overall_progress.pack(fill="x", padx=20, pady=(8, 5))
         self.overall_progress.set(0)
@@ -301,69 +299,60 @@ class DiagnosticWizard(ctk.CTkToplevel):
 
     def _create_quick_button(self, parent, row, col, title, subtitle, color, hover_color, command, border_color=None):
         """Cria botão de ação rápida com hover correto"""
-        # Frame container com borda opcional
         f = ctk.CTkFrame(
-            parent, 
-            fg_color=color, 
+            parent,
+            fg_color=color,
             corner_radius=10,
             border_width=2 if border_color else 0,
             border_color=border_color or color
         )
         f.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
-        
-        # Título
+
         title_label = ctk.CTkLabel(
-            f, 
-            text=title, 
+            f,
+            text=title,
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color="white",
             anchor="w"
         )
         title_label.pack(fill="x", padx=16, pady=(12, 2))
-        
-        # Subtítulo
+
         subtitle_label = ctk.CTkLabel(
-            f, 
-            text=subtitle, 
-            font=ctk.CTkFont(size=10), 
+            f,
+            text=subtitle,
+            font=ctk.CTkFont(size=10),
             text_color="#cccccc",
             anchor="w"
         )
         subtitle_label.pack(fill="x", padx=16, pady=(0, 12))
-        
-        # Hover effect - usa flag para rastrear estado
+
         hover_state = [False]
-        
+
         def check_hover(widget, is_enter):
-            """Verifica se o mouse ainda está sobre algum widget do grupo"""
             hover_state[0] = is_enter
-            # Pequeno delay para verificar se o mouse foi para um widget filho
             def update_color():
                 if hover_state[0]:
                     f.configure(fg_color=hover_color)
                 else:
                     f.configure(fg_color=color)
             f.after(10, update_color)
-        
+
         def on_enter(e):
             check_hover(e.widget, True)
-        
+
         def on_leave(e):
-            # Verifica se saiu para fora do frame ou para um filho
             try:
                 x, y = f.winfo_pointerxy()
                 widget_under = f.winfo_containing(x, y)
-                # Se o widget sob o mouse é o frame ou um filho dele, mantém hover
                 if widget_under == f or widget_under == title_label or widget_under == subtitle_label:
                     return
-            except:
+            except Exception:
                 pass
             check_hover(e.widget, False)
-        
+
         def on_click(e):
             command()
-        
-        # Bind em todos os elementos
+
         for widget in [f, title_label, subtitle_label]:
             widget.bind("<Enter>", on_enter)
             widget.bind("<Leave>", on_leave)
@@ -405,7 +394,8 @@ class DiagnosticWizard(ctk.CTkToplevel):
             w.destroy()
         self.report_btn = None
         self.report_path_label = None
-        
+        self.report_status_label = None
+
         self.overall_progress.set(0)
         self.progress_status.configure(text="")
         self.selection_label.configure(text="")
@@ -439,7 +429,7 @@ class DiagnosticWizard(ctk.CTkToplevel):
                 return
 
         self.start_time = time.time()
-        
+
         self.session = TestSession(
             device=self.device,
             tests_to_run=[AVAILABLE_TESTS[tid] for tid in self.selected_tests],
@@ -452,12 +442,12 @@ class DiagnosticWizard(ctk.CTkToplevel):
         self.cancel_btn.configure(state="normal")
         self.progress_status.configure(text="Executando Testes... 0% (0s)", text_color=COLOR_INFO)
         self.footer_label.configure(text="Testes em execução...")
-        
-        # Inicia timer de progresso independente (atualiza a cada 1 segundo)
+
+        # Inicia timer de progresso independente
         self._progress_timer_active = True
         self._current_test_progress = 0
         self._update_progress_timer()
-        
+
         threading.Thread(target=TestRunner.run_tests, args=(self.session,), daemon=True).start()
 
     def _cancel_tests(self):
@@ -465,7 +455,7 @@ class DiagnosticWizard(ctk.CTkToplevel):
             current = self.session.current_test or "desconhecido"
             test_name = AVAILABLE_TESTS.get(current)
             test_display = test_name.name if test_name else current
-            
+
             dialog = ConfirmDialog(self,
                                    title="⚠️ Cancelar Teste",
                                    message=f"O teste '{test_display}' está em andamento.",
@@ -475,77 +465,71 @@ class DiagnosticWizard(ctk.CTkToplevel):
                                    is_destructive=True)
             if dialog.show():
                 TestRunner.cancel_session(self.session)
-                self._progress_timer_active = False  # Para o timer
+                self._progress_timer_active = False
                 self.start_btn.configure(state="normal")
                 self.cancel_btn.configure(state="disabled")
                 self.progress_status.configure(text="Cancelado", text_color=COLOR_WARN)
                 self.footer_label.configure(text="Testes cancelados")
 
     def _on_progress(self, test_id: str, progress: int, message: str):
-        """Callback do teste - apenas armazena valores para o timer atualizar"""
-        # Armazena o progresso atual do teste para o timer usar
+        """Callback do teste - armazena valores para o timer atualizar"""
         self._current_test_progress = progress
         self._current_test_message = message
         self._current_test_id = test_id
-        
+
         def update():
             if not self.winfo_exists():
                 return
-                
+
             if test_id in self.test_cards:
                 card = self.test_cards[test_id]
                 if card.winfo_exists():
                     card.set_running(message)
                     card.set_progress(progress, message)
-        
+
         self.after(0, update)
-    
+
     def _update_progress_timer(self):
         """Timer independente que atualiza tempo e progresso a cada segundo"""
         if not self._progress_timer_active:
             return
         if not self.winfo_exists():
             return
-        
+
         try:
-            # Sempre atualiza o tempo (a cada segundo)
             elapsed = time.time() - self.start_time
             time_str = format_duration(elapsed)
-            
-            # Calcula progresso geral baseado no último valor conhecido
+
             if self.session:
                 done = len(self.session.results)
                 total = len(self.selected_tests)
                 progress = self._current_test_progress
                 overall = (done + progress / 100) / total if total > 0 else 0
                 self.overall_progress.set(overall)
-                
+
                 overall_pct = int(overall * 100)
                 self.progress_status.configure(
                     text=f"Executando Testes... {overall_pct}% ({time_str})",
                     text_color=COLOR_INFO
                 )
-            
-            # Agenda próxima atualização (1 segundo)
+
             self.after(1000, self._update_progress_timer)
         except Exception:
-            # Em caso de erro, tenta novamente
             self.after(1000, self._update_progress_timer)
 
     def _on_test_complete(self, result):
         def update():
             if not self.winfo_exists():
                 return
-            
-            # Reseta progresso do teste atual (próximo teste começa do 0)
+
             self._current_test_progress = 0
             self._current_test_message = ""
-                
+
             if result.test_id in self.test_cards:
                 card = self.test_cards[result.test_id]
                 if not card.winfo_exists():
                     return
-                    
+
                 if result.status == TestStatus.COMPLETED:
                     card.set_completed(result.message)
                 elif result.status == TestStatus.FAILED:
@@ -554,30 +538,29 @@ class DiagnosticWizard(ctk.CTkToplevel):
                     card.set_skipped("Cancelado")
                 elif result.status == TestStatus.SKIPPED:
                     card.set_skipped(result.message)
-        
+
         self.after(0, update)
 
     def _on_session_complete(self):
         def update():
             if not self.winfo_exists():
                 return
-            
-            # Para o timer de progresso
+
             self._progress_timer_active = False
-                
+
             self.start_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
             self.overall_progress.set(1)
-            
+
             elapsed = time.time() - self.start_time
             time_str = format_duration(elapsed)
-            
+
             if self.session:
                 completed = sum(1 for r in self.session.results.values()
                                if r.status == TestStatus.COMPLETED)
                 failed = sum(1 for r in self.session.results.values()
                             if r.status == TestStatus.FAILED)
-                
+
                 if failed > 0:
                     self.progress_status.configure(
                         text=f"⚠️ {failed} problema(s) • 100% ({time_str})",
@@ -602,29 +585,34 @@ class DiagnosticWizard(ctk.CTkToplevel):
                                             font=ctk.CTkFont(size=14, weight="bold"),
                                             command=self._open_report)
             self.report_btn.pack(pady=10, fill="x")
-            
+
             # Verifica se é um disco falso para mostrar opções extras
             self._check_for_fake_disk()
 
         self.after(0, update)
+
     def _check_for_fake_disk(self):
         """Mostra painel de ações se o f3probe confirmou falsificação."""
-        for result in self.session_results:
-            if result.test_id == "f3probe" and result.status == TestStatus.FAILED:
+        if not self.session or not self.session.results:
+            return
+
+        for test_id, result in self.session.results.items():
+            if test_id == "f3probe" and result.status == TestStatus.FAILED:
                 fake_data = result.data if isinstance(result.data, dict) else None
 
-                # Limpa área de relatório e mostra painel
-                for widget in self.report_container.winfo_children():
-                    widget.destroy()
-
-                panel = FakeActionPanel(
-                    self.report_container,
-                    device=self.device,
-                    fake_data=fake_data,
-                    action_callback=self._handle_fake_action
-                )
-                panel.pack(fill="x", pady=10)
+                try:
+                    from ui.fake_action_panel import FakeActionPanel
+                    panel = FakeActionPanel(
+                        self.report_container,
+                        device=self.device,
+                        fake_data=fake_data,
+                        action_callback=self._handle_fake_action
+                    )
+                    panel.pack(fill="x", pady=10)
+                except ImportError:
+                    pass
                 return
+
     def _handle_fake_action(self, action: str):
         """Executa a ação escolhida no painel de disco fake."""
         if action == "report":
@@ -637,119 +625,109 @@ class DiagnosticWizard(ctk.CTkToplevel):
             self._run_prepare_return()
         elif action == "export_json":
             self._export_fake_json()
-        else:
-            messagebox.showinfo("Ação", f"Ação não reconhecida: {action}")
-    def _run_fix_capacity(self):
-        """Roda o f3fix usando o last-sec identificado pelo f3probe.
 
-        AVISO: é destrutivo (recria tabela/partição), então pede confirmação forte.
-        """
+    def _run_fix_capacity(self):
+        """Roda o f3fix usando o last-sec identificado pelo f3probe."""
         f3data = None
-        for r in self.session_results:
-            if r.test_id == "f3probe" and isinstance(r.data, dict):
-                f3data = r.data
-                break
+        if self.session and self.session.results:
+            for test_id, r in self.session.results.items():
+                if test_id == "f3probe" and isinstance(r.data, dict):
+                    f3data = r.data
+                    break
 
         last_sec = None
         if f3data:
             last_sec = f3data.get("last_sec")
 
         if last_sec is None:
-            messagebox.showwarning(
-                "f3fix",
-                "Não consegui identificar o last-sec do f3probe.\n"
-                "Reexecute o teste f3probe ou use o comando sugerido no painel."
+            self._set_report_status(
+                "⚠️ Não consegui identificar o last-sec do f3probe. "
+                "Reexecute o teste f3probe."
             )
             return
 
         cmd = build_f3fix_command(self.device, int(last_sec))
         cmd_str = " ".join(cmd)
 
-        confirm_msg = (
-            "Esta ação VAI APAGAR a tabela de partição / metadados do disco e criar uma partição com o tamanho real.\n\n"
-            "Use apenas se você já salvou tudo o que precisava.\n\n"
-            f"Comando:\n{cmd_str}"
+        dialog = ConfirmDialog(
+            self,
+            title="Confirmar correção para tamanho real",
+            message=(
+                "Esta ação VAI APAGAR a tabela de partição e criar uma "
+                "partição com o tamanho real.\n\n"
+                f"Comando: {cmd_str}"
+            ),
+            warning="IRREVERSÍVEL! Certifique-se de ter salvo tudo.",
+            confirm_text="APAGAR E CORRIGIR",
+            cancel_text="Cancelar",
+            is_destructive=True
         )
+        if not dialog.show():
+            return
 
         def do_run():
             try:
-                self._set_report_status("Executando f3fix... (isso pode levar alguns segundos)")
+                self._set_report_status("Executando f3fix...")
                 p = run_cmd(cmd, timeout=1200)
                 out = (p.stdout or "") + (p.stderr or "")
                 if p.returncode == 0:
-                    self._set_report_status("✅ f3fix concluído. Remova e reconecte o disco para o sistema recarregar as partições.")
+                    self._set_report_status("✅ f3fix concluído. Remova e reconecte o disco.")
                 else:
-                    self._set_report_status("❌ f3fix falhou. Veja a saída abaixo (talvez precise rodar o app como root).")
+                    self._set_report_status("❌ f3fix falhou (talvez precise de root).")
                 self._append_report_log(out.strip() or "(sem saída)")
             except Exception as e:
-                self._set_report_status(f"❌ Erro ao executar f3fix: {e}")
+                self._set_report_status(f"❌ Erro: {e}")
 
-        ConfirmDialog(
-            parent=self,
-            title="Confirmar correção para tamanho real",
-            message=confirm_msg,
-            confirm_text="APAGAR E CORRIGIR",
-            cancel_text="Cancelar",
-            on_confirm=do_run
-        )
+        threading.Thread(target=do_run, daemon=True).start()
 
     def _run_recover_data(self):
-        """Ajuda o usuário a tentar salvar o que for possível (não destrutivo)."""
-        mount_point = None
-        try:
-            mount_point = getattr(self.disk_info, "mount_point", None)
-        except Exception:
-            pass
+        """Ajuda o usuário a tentar salvar o que for possível."""
+        mount_point = getattr(self.disk_info, "mount_point", None) if self.disk_info else None
 
         msg = (
             "Recuperação (somente leitura):\n\n"
-            "1) Se o disco estiver montado, copie imediatamente os arquivos importantes para outro disco.\n"
-            "2) Evite escrever nesse disco (qualquer gravação pode cair fora da área real e corromper tudo).\n\n"
+            "1) Copie imediatamente os arquivos importantes para outro disco.\n"
+            "2) Evite escrever nesse disco."
         )
-
         if mount_point:
-            msg += f"Ponto de montagem detectado: {mount_point}\n\n"
-            msg += "Quer abrir a pasta agora?"
-        else:
-            msg += (
-                "Não encontrei um ponto de montagem automático.\n"
-                "Você pode tentar montar a partição manualmente e copiar os arquivos que existirem.\n"
-                "Exemplo (ajuste /dev/sdX1):\n"
-                f"  sudo mkdir -p /mnt/recovery && sudo mount -o ro {self.device}1 /mnt/recovery\n"
-            )
+            msg += f"\n\nPonto de montagem: {mount_point}"
 
-        def open_folder():
-            try:
-                import subprocess
-                if mount_point:
-                    subprocess.run(["xdg-open", str(mount_point)], check=False)
-            except Exception:
-                pass
-
-        ConfirmDialog(
-            parent=self,
+        dialog = ConfirmDialog(
+            self,
             title="Recuperar dados",
             message=msg,
             confirm_text="Abrir pasta" if mount_point else "OK",
             cancel_text="Fechar",
-            on_confirm=open_folder if mount_point else (lambda: None),
         )
+        if dialog.show() and mount_point:
+            try:
+                subprocess.run(["xdg-open", str(mount_point)], check=False)
+            except Exception:
+                pass
 
     def _run_prepare_return(self):
-        """Limpa assinaturas/metadados para devolução/descarte (destrutivo, mas rápido)."""
+        """Limpa assinaturas/metadados para devolução/descarte."""
         cmds = wipe_signatures_commands(self.device)
         cmd_preview = "\n".join([" ".join(c) for c in cmds])
 
-        confirm_msg = (
-            "Isto vai APAGAR assinaturas de filesystem/RAID e a tabela de partição (MBR/GPT).\n"
-            "É útil para devolução/descarte e para evitar que o disco seja 'reformatado' e revendido como novo.\n\n"
-            "NÃO apaga o disco inteiro (não é wipe completo), mas é destrutivo para o conteúdo visível.\n\n"
-            f"Comandos:\n{cmd_preview}"
+        dialog = ConfirmDialog(
+            self,
+            title="Confirmar limpeza para devolução/descarte",
+            message=(
+                "Isto vai APAGAR assinaturas de filesystem e tabela de partição.\n\n"
+                f"Comandos:\n{cmd_preview}"
+            ),
+            warning="DESTRUTIVO para o conteúdo visível!",
+            confirm_text="APAGAR METADADOS",
+            cancel_text="Cancelar",
+            is_destructive=True
         )
+        if not dialog.show():
+            return
 
         def do_wipe():
             try:
-                self._set_report_status("Executando limpeza rápida (wipefs + dd)...")
+                self._set_report_status("Executando limpeza rápida...")
                 full_out = []
                 ok = True
                 for c in cmds:
@@ -759,49 +737,44 @@ class DiagnosticWizard(ctk.CTkToplevel):
                     if p.returncode != 0:
                         ok = False
                 if ok:
-                    self._set_report_status("✅ Limpeza concluída. Agora o disco deve aparecer como 'não inicializado'.")
+                    self._set_report_status("✅ Limpeza concluída.")
                 else:
-                    self._set_report_status("⚠️ Limpeza terminou com erros. Veja a saída abaixo.")
+                    self._set_report_status("⚠️ Limpeza terminou com erros.")
                 self._append_report_log("\n".join(full_out).strip())
             except Exception as e:
-                self._set_report_status(f"❌ Erro na limpeza: {e}")
+                self._set_report_status(f"❌ Erro: {e}")
 
-        ConfirmDialog(
-            parent=self,
-            title="Confirmar limpeza para devolução/descarte",
-            message=confirm_msg,
-            confirm_text="APAGAR METADADOS",
-            cancel_text="Cancelar",
-            on_confirm=do_wipe
-        )
+        threading.Thread(target=do_wipe, daemon=True).start()
 
     def _export_fake_json(self):
-        """Exporta um JSON de evidências (para disputa / compartilhamento)."""
+        """Exporta JSON de evidências."""
         f3data = {}
-        for r in self.session_results:
-            if r.test_id == "f3probe" and isinstance(r.data, dict):
-                f3data = r.data
-                break
+        if self.session and self.session.results:
+            for test_id, r in self.session.results.items():
+                if test_id == "f3probe" and isinstance(r.data, dict):
+                    f3data = r.data
+                    break
 
         disk_info_dict = {}
-        for attr in ["device", "model", "serial", "size", "transport", "mount_point", "fstype", "health_score", "temperature"]:
-            try:
-                v = getattr(self.disk_info, attr, None)
-                if v is not None:
-                    disk_info_dict[attr] = v
-            except Exception:
-                pass
+        if self.disk_info:
+            for attr in ["device", "model", "serial", "total_gb", "disk_type", "mount_point", "health", "temp"]:
+                try:
+                    v = getattr(self.disk_info, attr, None)
+                    if v is not None:
+                        disk_info_dict[attr] = v
+                except Exception:
+                    pass
 
         tests = []
-        for r in self.session_results:
-            tests.append({
-                "test_id": r.test_id,
-                "name": r.name,
-                "status": str(r.status),
-                "message": r.message,
-                "duration_seconds": r.duration_seconds,
-                "data": r.data,
-            })
+        if self.session and self.session.results:
+            for test_id, r in self.session.results.items():
+                tests.append({
+                    "test_id": r.test_id,
+                    "status": str(r.status),
+                    "message": r.message,
+                    "duration_seconds": r.duration_seconds,
+                    "data": r.data,
+                })
 
         try:
             out_path = export_fake_evidence_json(
@@ -813,39 +786,47 @@ class DiagnosticWizard(ctk.CTkToplevel):
             )
             self._set_report_status(f"📦 Evidências exportadas: {out_path}")
             try:
-                import subprocess
                 subprocess.run(["xdg-open", str(out_path.parent)], check=False)
             except Exception:
                 pass
         except Exception as e:
-            messagebox.showerror("Exportar JSON", f"Falha ao exportar evidências: {e}")
+            self._set_report_status(f"❌ Falha ao exportar: {e}")
 
     def _set_report_status(self, text: str):
         """Atualiza/Cria um label de status dentro do report_container."""
-        try:
-            if hasattr(self, "report_status_label") and self.report_status_label:
-                self.report_status_label.configure(text=text)
-            else:
-                self.report_status_label = ctk.CTkLabel(
-                    self.report_container,
-                    text=text,
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                    text_color=COLOR_TEXT_LIGHT,
-                    anchor="w"
-                )
-                self.report_status_label.pack(fill="x", pady=(8, 4))
-        except Exception:
-            pass
+        def _update():
+            if not self.winfo_exists():
+                return
+            try:
+                if self.report_status_label and self.report_status_label.winfo_exists():
+                    self.report_status_label.configure(text=text)
+                else:
+                    self.report_status_label = ctk.CTkLabel(
+                        self.report_container,
+                        text=text,
+                        font=ctk.CTkFont(size=12, weight="bold"),
+                        text_color=COLOR_TEXT_LIGHT,
+                        anchor="w"
+                    )
+                    self.report_status_label.pack(fill="x", pady=(8, 4))
+            except Exception:
+                pass
+        self.after(0, _update)
 
     def _append_report_log(self, text: str):
-        """Anexa um log (CTkTextbox) na UI."""
-        try:
-            box = ctk.CTkTextbox(self.report_container, height=200)
-            box.pack(fill="x", pady=(6, 10))
-            box.insert("1.0", text or "")
-            box.configure(state="disabled")
-        except Exception:
-            pass
+        """Anexa um log na UI."""
+        def _update():
+            if not self.winfo_exists():
+                return
+            try:
+                box = ctk.CTkTextbox(self.report_container, height=200)
+                box.pack(fill="x", pady=(6, 10))
+                box.insert("1.0", text or "")
+                box.configure(state="disabled")
+            except Exception:
+                pass
+        self.after(0, _update)
+
     def _open_report(self):
         if self.session and self.session.results:
             path = generate_html_report(
@@ -853,29 +834,24 @@ class DiagnosticWizard(ctk.CTkToplevel):
                 self.device,
                 disk_info=self.disk_info
             )
-            
-            # Feedback visual inline - sem popup!
-            # 1. Botão muda para estado "gerado"
+
             self.report_btn.configure(
                 text="✅ Relatório Gerado!",
                 fg_color=COLOR_GOOD,
                 hover_color=COLOR_GOOD,
                 state="disabled"
             )
-            
-            # 2. Mostra caminho + botão abrir pasta
+
             if not self.report_path_label:
-                # Container para caminho e botão
                 path_frame = ctk.CTkFrame(self.report_container, fg_color="transparent")
                 path_frame.pack(fill="x", pady=(5, 0))
-                
-                # Caminho do arquivo (truncado se muito longo)
+
                 path_str = str(path)
                 if len(path_str) > 60:
                     path_display = "..." + path_str[-57:]
                 else:
                     path_display = path_str
-                
+
                 self.report_path_label = ctk.CTkLabel(
                     path_frame,
                     text=f"📄 {path_display}",
@@ -884,16 +860,13 @@ class DiagnosticWizard(ctk.CTkToplevel):
                     anchor="w"
                 )
                 self.report_path_label.pack(side="left", fill="x", expand=True)
-                
-                # Botão pequeno para abrir pasta
-                import subprocess
+
                 def open_folder():
                     try:
-                        folder = path.parent
-                        subprocess.run(["xdg-open", str(folder)], check=False)
-                    except:
+                        subprocess.run(["xdg-open", str(path.parent)], check=False)
+                    except Exception:
                         pass
-                
+
                 ctk.CTkButton(
                     path_frame,
                     text="📂",
@@ -906,7 +879,6 @@ class DiagnosticWizard(ctk.CTkToplevel):
                 ).pack(side="right", padx=(8, 0))
 
     def _temp_color(self, temp) -> str:
-        """Retorna cor baseada na temperatura"""
         if temp is None:
             return COLOR_NA
         if temp < 45:
@@ -914,46 +886,40 @@ class DiagnosticWizard(ctk.CTkToplevel):
         if temp < 55:
             return COLOR_WARN
         return COLOR_CRIT
-    
+
     def _start_temp_monitor(self):
-        """Inicia monitoramento de temperatura em tempo real"""
         self._temp_monitor_active = True
         self._update_temp()
-    
+
     def _update_temp(self):
-        """Atualiza temperatura periodicamente"""
         if not self._temp_monitor_active:
             return
         if not self.winfo_exists():
             return
-        
+
         try:
-            # Atualiza temperatura do disco
             smart = SmartParser.parse(self.device)
             temp = smart.temperature
-            
+
             if temp:
                 self.temp_label.configure(
                     text=f"{temp}°C",
                     text_color=self._temp_color(temp)
                 )
-            
-            # Agenda próxima atualização (a cada 5 segundos)
+
             self.after(5000, self._update_temp)
-        except:
-            # Em caso de erro, tenta novamente depois
+        except Exception:
             self.after(10000, self._update_temp)
 
     def _on_close(self):
-        # Para os timers
         self._temp_monitor_active = False
         self._progress_timer_active = False
-        
+
         if self.session and self.session.is_running:
             current = self.session.current_test or "desconhecido"
             test_name = AVAILABLE_TESTS.get(current)
             test_display = test_name.name if test_name else current
-            
+
             dialog = ConfirmDialog(self,
                                    title="⚠️ Teste em Execução",
                                    message=f"O teste '{test_display}' está em andamento.",
